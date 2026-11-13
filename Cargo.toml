@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "packages/aa_agent",
+    "packages/aa_language_model",
+    "packages/aa_language_models",
+    "packages/aa_language_models/aa_ai_openai",
+]
+
+# 依赖统一在这里声明版本：成员 crate 只写 `dep.workspace = true`。
+# 好处是升级/对齐版本只有一处，且不会出现两个包依赖不同大版本。
+[workspace.dependencies]
+aa_language_model = { path = "packages/aa_language_model" }
+aa_language_models = { path = "packages/aa_language_models" }
+aa_ai_openai = { path = "packages/aa_language_models/aa_ai_openai" }
+
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }

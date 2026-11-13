@@ -1,0 +1,12 @@
+[package]
+name = "aa_ai_openai"
+version = "0.1.0"
+edition = "2024"
+
+# 一家 provider 一个 crate：只有这里依赖网络库和厂商 JSON 字段。
+[dependencies]
+aa_language_model.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true

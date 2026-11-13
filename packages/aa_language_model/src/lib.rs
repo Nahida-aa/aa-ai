@@ -1,0 +1,24 @@
+//! `aa_language_model` — canonical IR + provider 通信接口。
+//!
+//! 这个 crate **只有**两样东西：
+//! - `request`：canonical IR（`request::Request`、`request::message::*`、`request::tools::*`）；
+//! - `provider`：`provider::LanguageModelClient` trait + 错误 + 事件类型。
+//!
+//! 不含任何厂商的 wire 格式，也**不依赖 `reqwest`**。加一家 provider = 新增一个
+//! `aa_ai_<provider>` crate，不动这里。布局与命名规则见
+//! [`docs/design/crate-layout.md`](../../../docs/design/crate-layout.md)。
+//!
+//! 引用约定：**命名空间 + 短类型名，且写完整路径、不写 `use` 导入**。下游一律写
+//! `aa_language_model::request::Request`、`aa_language_model::request::message::Message`、
+//! `aa_language_model::provider::LlmError`；不要 `use aa_language_model::request;` 之后
+//! 写 `request::Request`，更不要 `use aa_language_model::request::Request;` 之后写裸
+//! `Request`。crate 内部同理，写 `crate::request::message::ContentPart`。
+//! 理由与正反例见 [`docs/design/crate-layout.md`](../../../docs/design/crate-layout.md) §3。
+//!
+//! 三层结构（见 `docs/decisions/0001-ir-layering.md`）：
+//! - 历史模型：调用方持有 `Vec<Arc<request::message::Message>>`，唯一真相；
+//! - 请求 IR：`request::Request`，按需克隆 `Arc`；
+//! - wire DTO：provider crate 内部私有类型（如 `aa_ai_openai` 的 JSON body）。
+
+pub mod provider;
+pub mod request;

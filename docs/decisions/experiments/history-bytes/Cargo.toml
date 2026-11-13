@@ -1,0 +1,10 @@
+[package]
+name = "history-bytes"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# 独立 workspace：避免被 aa-ai 根 workspace 自动纳入
+[workspace]
+
+[dependencies]

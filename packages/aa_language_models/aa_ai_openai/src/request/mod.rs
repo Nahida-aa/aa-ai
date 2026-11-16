@@ -124,9 +124,7 @@ pub struct ChatToolChoiceFunctionName<'a> {
 pub enum ChatResponseFormat<'a> {
     Text,
     JsonObject,
-    JsonSchema {
-        json_schema: ChatJsonSchema<'a>,
-    },
+    JsonSchema { json_schema: ChatJsonSchema<'a> },
 }
 
 #[derive(Debug, Serialize)]
@@ -253,39 +251,42 @@ pub fn to_chat_completion_request<'a>(
         });
     }
 
-        // 每请求的选择从 `request` 读；静态能力位从 `model` 读（0006 D4 / A 方案）。
-        // 输出上限：请求可覆盖模型默认（对齐 Zed `effective_max_output_tokens`）。
-        let max_output_tokens = request.max_output_tokens.or(model.max_output_tokens);
-        Ok(ChatCompletionRequest {
-            model: &model.id,
-            messages,
-            temperature: request.temperature,
-            max_tokens: (!model.uses_max_completion_tokens)
-                .then_some(max_output_tokens)
-                .flatten(),
-            max_completion_tokens: model
-                .uses_max_completion_tokens
-                .then_some(max_output_tokens)
-                .flatten(),
-            stream: request.stream,
-            // `stream_options` 只在流式时带，且仅为一个 `include_usage: true`
-            // （对齐 Zed `completion.rs:205-209` 的 `StreamOptions::default()`）。
-            stream_options: request.stream.then_some(StreamOptions {
-                include_usage: true,
-            }),
-            stop: (!request.stop.is_empty()).then_some(request.stop.as_slice()),
-            tool_choice: request.tool_choice.as_ref().map(to_wire_tool_choice),
-            parallel_tool_calls: (model.supports_parallel_tool_calls && !request.tools.is_empty())
-                .then_some(true),
-            response_format: request.response_format.as_ref().map(to_wire_response_format),
-            reasoning_effort: request.reasoning_effort,
-            service_tier: request.service_tier,
-            // 仅当模型支持该字段、且本次请求确实给了键时才发。
-            prompt_cache_key: model
-                .supports_prompt_cache_key
-                .then(|| request.prompt_cache_key.as_deref())
-                .flatten(),
-            tools,
+    // 每请求的选择从 `request` 读；静态能力位从 `model` 读（0006 D4 / A 方案）。
+    // 输出上限：请求可覆盖模型默认（对齐 Zed `effective_max_output_tokens`）。
+    let max_output_tokens = request.max_output_tokens.or(model.max_output_tokens);
+    Ok(ChatCompletionRequest {
+        model: &model.id,
+        messages,
+        temperature: request.temperature,
+        max_tokens: (!model.uses_max_completion_tokens)
+            .then_some(max_output_tokens)
+            .flatten(),
+        max_completion_tokens: model
+            .uses_max_completion_tokens
+            .then_some(max_output_tokens)
+            .flatten(),
+        stream: request.stream,
+        // `stream_options` 只在流式时带，且仅为一个 `include_usage: true`
+        // （对齐 Zed `completion.rs:205-209` 的 `StreamOptions::default()`）。
+        stream_options: request.stream.then_some(StreamOptions {
+            include_usage: true,
+        }),
+        stop: (!request.stop.is_empty()).then_some(request.stop.as_slice()),
+        tool_choice: request.tool_choice.as_ref().map(to_wire_tool_choice),
+        parallel_tool_calls: (model.supports_parallel_tool_calls && !request.tools.is_empty())
+            .then_some(true),
+        response_format: request
+            .response_format
+            .as_ref()
+            .map(to_wire_response_format),
+        reasoning_effort: request.reasoning_effort,
+        service_tier: request.service_tier,
+        // 仅当模型支持该字段、且本次请求确实给了键时才发。
+        prompt_cache_key: model
+            .supports_prompt_cache_key
+            .then_some(request.prompt_cache_key.as_deref())
+            .flatten(),
+        tools,
     })
 }
 
@@ -300,9 +301,8 @@ pub fn encode<'a>(
     let body = to_chat_completion_request(request, model)?;
     let mut bytes = Vec::new();
     // `Serialize` 到 `Vec<u8>` 不会失败（DTO 只含 JSON 安全类型）。
-    serde_json::to_writer(&mut bytes, &body).map_err(|e| {
-        aa_language_model::provider::LlmError::Transport(e.to_string())
-    })?;
+    serde_json::to_writer(&mut bytes, &body)
+        .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
     Ok(bytes)
 }
 

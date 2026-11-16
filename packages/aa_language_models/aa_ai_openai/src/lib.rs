@@ -1,11 +1,16 @@
 //! OpenAI（或 OpenAI 兼容端点）provider：真连 LLM 服务器。
-//! v0 最小实现：chat completions（非流式取整个 response，再映射成事件流）。
 //!
 //! 本 crate 只负责 **OpenAI 的 wire 形状**：
 //! - [`request`]：请求 wire DTO（借用 canonical IR）+ 编码器
 //!   （`to_chat_completion_request` 产出借用 DTO，`encode` 用 `to_writer` 写成 owned 字节）；
-//! - 响应 DTO（本文件，私有）与事件映射；
+//! - [`response`]：响应 DTO（非流式 / SSE chunk / 错误 body）+ `finish_reason`、`usage`
+//!   映射 + `StreamDecoder`；
 //! - [`OpenAiLanguageModelProvider`]：HTTP 调用 + 响应 → `CompletionEvent`。
+//!
+//! 两种模式：`request.stream == false` 时读整个 JSON body；`true` 时读
+//! `text/event-stream`，逐帧产出 `Text` / `ToolUse`（按 `index` 归并增量）/ `Usage` /
+//! `Stop`。两条路径都从 `finish_reason` 得出 `StopReason`（见
+//! [`docs/decisions/0007-response-mapping.md`](../../../../../docs/decisions/0007-response-mapping.md)）。
 //!
 //! canonical IR 和 `LanguageModelClient` trait 在 `aa_language_model`：core 不依赖 `reqwest`，
 //! 加一家 provider = 新增一个 crate，不动 core。这与 Zed 的
@@ -19,7 +24,9 @@
 //! 我们这里只有后者，因为「注册」那一半属于 `aa_language_models`。
 
 pub mod request;
+pub mod response;
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -50,40 +57,6 @@ impl OpenAiLanguageModelProvider {
     }
 }
 
-// ---------- 响应类型 ----------
-
-// OpenAI 响应里一次 assistant 消息（非流式先取整个 response，再映射成事件流）。
-#[derive(serde::Deserialize)]
-struct OpenAiResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(serde::Deserialize)]
-struct Choice {
-    message: MessageDelta,
-}
-
-#[derive(serde::Deserialize)]
-struct MessageDelta {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<OpenAiToolCall>,
-}
-
-#[derive(serde::Deserialize)]
-struct OpenAiToolCall {
-    id: String,
-    function: OpenAiFunction,
-}
-
-#[derive(serde::Deserialize)]
-struct OpenAiFunction {
-    name: String,
-    /// OpenAI 把参数当字符串（JSON 文本）回。
-    arguments: String,
-}
-
 // ---------- LanguageModelClient ----------
 
 impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelProvider {
@@ -108,6 +81,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
             Ok(bytes) => bytes,
             Err(err) => return Box::pin(async move { Err(err) }),
         };
+        let wants_stream = request.stream;
 
         // future 需要的全部东西都先变成 owned，才能是 `'static`。
         let http = self.http.clone();
@@ -126,59 +100,143 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
 
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
-                let msg = resp.text().await.unwrap_or_default();
-                let transient = matches!(status, 408 | 425 | 429 | 500..=599);
+                let raw = resp.text().await.unwrap_or_default();
                 let err = aa_language_model::provider::LlmError::ProviderRejection {
                     status,
-                    message: msg,
-                    transient,
+                    // 只取 `error.message`，不要把整段 JSON / HTML 塞给上层。
+                    message: crate::response::error_message(&raw),
+                    transient: matches!(status, 408 | 425 | 429 | 500..=599),
                 };
                 return Ok(stream::once(async move { Err(err) }).boxed());
             }
 
-            let parsed: OpenAiResponse = resp
+            if wants_stream {
+                // 立即把 response 交给流式解码器：不缓冲整个 body，边到边解。
+                return Ok(sse_event_stream(resp.bytes_stream()));
+            }
+
+            let parsed: crate::response::ChatCompletionResponse = resp
                 .json()
                 .await
                 .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
-
-            let mut events: Vec<aa_language_model::provider::CompletionEvent> = Vec::new();
-            let mut wants_tools = false;
-            if let Some(choice) = parsed.choices.first() {
-                if let Some(text) = &choice.message.content
-                    && !text.is_empty()
-                {
-                    events.push(aa_language_model::provider::CompletionEvent::Text(
-                        text.clone(),
-                    ));
-                }
-                for tc in &choice.message.tool_calls {
-                    let input = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                        .unwrap_or(serde_json::Value::String(tc.function.arguments.clone()));
-                    events.push(aa_language_model::provider::CompletionEvent::ToolUse {
-                        id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        input,
-                        is_complete: true,
-                    });
-                }
-                wants_tools = !choice.message.tool_calls.is_empty();
-            }
-            // 有工具调用时必须报 `ToolUse`：agent loop 靠它判断「还要再来一轮」。
-            let stop = if wants_tools {
-                aa_language_model::provider::StopReason::ToolUse
-            } else {
-                aa_language_model::provider::StopReason::EndTurn
-            };
-            events.push(aa_language_model::provider::CompletionEvent::Stop(stop));
-
-            Ok(stream::iter(events.into_iter().map(Ok)).boxed())
+            Ok(stream::iter(non_streaming_events(parsed)).boxed())
         })
     }
+}
+
+/// 非流式 body → 事件列表（最后一项是 `Stop`）。
+fn non_streaming_events(
+    parsed: crate::response::ChatCompletionResponse,
+) -> Vec<Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>>
+{
+    use aa_language_model::provider::CompletionEvent;
+
+    let mut events = Vec::new();
+    let mut has_tool_calls = false;
+    let mut finish_reason = None;
+
+    if let Some(choice) = parsed.choices.first() {
+        finish_reason = choice.finish_reason.as_deref();
+        if let Some(text) = &choice.message.content
+            && !text.is_empty()
+        {
+            events.push(Ok(CompletionEvent::Text(text.clone())));
+        }
+        for call in &choice.message.tool_calls {
+            has_tool_calls = true;
+            events.push(Ok(CompletionEvent::ToolUse {
+                id: call.id.clone(),
+                name: call.function.name.clone(),
+                input: parse_arguments(&call.function.arguments),
+                is_complete: true,
+            }));
+        }
+    }
+
+    // `usage` 放在 `Stop` 之前：上层看到 `Stop` 就可以收尾。
+    if let Some(usage) = parsed.usage {
+        events.push(Ok(CompletionEvent::Usage(usage.to_canonical())));
+    }
+    events.push(Ok(CompletionEvent::Stop(
+        crate::response::final_stop_reason(finish_reason, has_tool_calls),
+    )));
+    events
+}
+
+/// OpenAI 把参数当字符串回（`arguments: "{\"path\":\"a\"}"`）；解析失败保留原文。
+fn parse_arguments(arguments: &str) -> serde_json::Value {
+    serde_json::from_str(arguments)
+        .unwrap_or_else(|_| serde_json::Value::String(arguments.to_owned()))
+}
+
+// ---------- SSE ----------
+
+/// 把字节流解成 `CompletionEvent` 流（`text/event-stream`）。
+///
+/// 泛型 `S`/`B` 是为了不引入 `bytes` 依赖：只要能给出 `AsRef<[u8]>` 的分片即可。
+/// 每个网络分片到货就解码，不把整个响应缓冲起来。
+fn sse_event_stream<S, B>(inner: S) -> aa_language_model::provider::EventStream
+where
+    S: futures::Stream<Item = Result<B, reqwest::Error>> + Send + 'static,
+    B: AsRef<[u8]>,
+{
+    struct State<S> {
+        inner: Pin<Box<S>>,
+        decoder: crate::response::StreamDecoder,
+        pending: VecDeque<
+            Result<
+                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LlmError,
+            >,
+        >,
+        /// 网络流已结束（或出错），只剩 pending 要吐。
+        ended: bool,
+    }
+
+    let state = State {
+        inner: Box::pin(inner),
+        decoder: crate::response::StreamDecoder::default(),
+        pending: VecDeque::new(),
+        ended: false,
+    };
+
+    stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(item) = state.pending.pop_front() {
+                return Some((item, state));
+            }
+            if state.ended {
+                return None;
+            }
+            match state.inner.next().await {
+                Some(Ok(chunk)) => {
+                    state.pending.extend(state.decoder.push(chunk.as_ref()));
+                }
+                Some(Err(err)) => {
+                    state.ended = true;
+                    state
+                        .pending
+                        .push_back(Err(aa_language_model::provider::LlmError::Transport(
+                            err.to_string(),
+                        )));
+                }
+                None => {
+                    // 流结束但没收到 `[DONE]` / `finish_reason` → 解码器报 `StreamEnded`。
+                    let decoder = std::mem::take(&mut state.decoder);
+                    state.pending.extend(decoder.finish());
+                    state.ended = true;
+                }
+            }
+        }
+    })
+    .boxed()
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use futures::StreamExt;
 
     fn make_model(id: &str) -> aa_language_model::provider::Model {
         aa_language_model::provider::Model::new("openai", id)
@@ -271,174 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_tool_choice_and_response_format() {
-        use aa_language_model::request::{ResponseFormat, ToolChoice};
-
-        let schema = serde_json::json!({"type": "object", "properties": {"x": {"type": "integer"}}});
-
-        // keyword 型 tool_choice + json_schema 型 response_format
-        let req = aa_language_model::request::Request {
-            tool_choice: Some(ToolChoice::Required),
-            response_format: Some(ResponseFormat::JsonSchema {
-                name: "answer".to_owned(),
-                schema: schema.clone(),
-                strict: true,
-            }),
-            ..Default::default()
-        };
-        let model = make_model("gpt-5");
-        let json = serde_json::to_value(
-            crate::request::to_chat_completion_request(&req, &model).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(json["tool_choice"], "required");
-        assert_eq!(json["response_format"]["type"], "json_schema");
-        assert_eq!(json["response_format"]["json_schema"]["name"], "answer");
-        assert_eq!(json["response_format"]["json_schema"]["strict"], true);
-        assert_eq!(json["response_format"]["json_schema"]["schema"], schema);
-
-        // 指定工具名 → 嵌套对象形状
-        let req = aa_language_model::request::Request {
-            tool_choice: Some(ToolChoice::Specific("read_file".to_owned())),
-            response_format: Some(ResponseFormat::JsonObject),
-            ..Default::default()
-        };
-        let model = make_model("gpt-4o");
-        let json = serde_json::to_value(
-            crate::request::to_chat_completion_request(&req, &model).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(json["tool_choice"]["type"], "function");
-        assert_eq!(json["tool_choice"]["function"]["name"], "read_file");
-        assert_eq!(json["response_format"]["type"], "json_object");
-
-        // Auto / None / Text 三种简单形状
-        for (choice, expected) in [(ToolChoice::Auto, "auto"), (ToolChoice::None, "none")] {
-            let req = aa_language_model::request::Request {
-                tool_choice: Some(choice),
-                response_format: Some(ResponseFormat::Text),
-                ..Default::default()
-            };
-            let model = make_model("gpt-4o");
-            let json = serde_json::to_value(
-                crate::request::to_chat_completion_request(&req, &model).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(json["tool_choice"], expected);
-            assert_eq!(json["response_format"]["type"], "text");
-        }
-    }
-
-    #[test]
-    fn request_choices_and_model_capabilities_drive_wire_fields() {
-        use aa_language_model::provider::{ReasoningEffort, ServiceTier};
-
-        // 每请求选择放在 `Request`（对齐 Zed `LanguageModelRequest`）。
-        let req = aa_language_model::request::Request {
-            max_output_tokens: Some(128),
-            stream: true,
-            reasoning_effort: Some(ReasoningEffort::High),
-            service_tier: Some(ServiceTier::Flex),
-            prompt_cache_key: Some("thread-42".to_owned()),
-            ..Default::default()
-        };
-        // 静态能力位放在 `Model`（对齐 Zed `LanguageModel`）。
-        let model = aa_language_model::provider::Model {
-            uses_max_completion_tokens: true,
-            supports_parallel_tool_calls: true,
-            supports_prompt_cache_key: true,
-            ..make_model("gpt-5")
-        };
-        // 有 tools 时 parallel_tool_calls 才置位。
-        let req_with_tool = aa_language_model::request::Request {
-            tools: vec![Arc::new(
-                aa_language_model::request::tools::Tool::new_function(
-                    "f".to_owned(),
-                    String::new(),
-                    serde_json::json!({"type":"object"}),
-                    false,
-                ),
-            )],
-            ..req
-        };
-        let json = serde_json::to_value(
-            crate::request::to_chat_completion_request(&req_with_tool, &model).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(json["model"], "gpt-5");
-        assert_eq!(json["stream"], true);
-        assert_eq!(json["stream_options"]["include_usage"], true);
-        assert!(json.get("max_tokens").is_none());
-        assert_eq!(json["max_completion_tokens"], 128);
-        assert_eq!(json["parallel_tool_calls"], true);
-        assert_eq!(json["reasoning_effort"], "high");
-        assert_eq!(json["service_tier"], "flex");
-        assert_eq!(json["prompt_cache_key"], "thread-42");
-        // 按用户选 B：v0 wire 不纳入 Zed 没有的采样/诊断字段。
-        assert!(json.get("top_p").is_none());
-        assert!(json.get("seed").is_none());
-    }
-
-    #[test]
-    fn prompt_cache_key_requires_model_support() {
-        // 请求给了键，但模型不支持该字段 → 不发（能力位门控）。
-        let req = aa_language_model::request::Request {
-            prompt_cache_key: Some("thread-42".to_owned()),
-            ..Default::default()
-        };
-        let model = make_model("gpt-4o"); // supports_prompt_cache_key = false
-        let json = serde_json::to_value(
-            crate::request::to_chat_completion_request(&req, &model).unwrap(),
-        )
-        .unwrap();
-        assert!(json.get("prompt_cache_key").is_none());
-    }
-
-    #[test]
-    fn encode_produces_owned_bytes_outliving_request() {
-        // 0006 D1：借用 DTO 的 'a 终结在 encode 内部，产出的 Vec<u8> 不借 Request。
-        let bytes = {
-            let req = aa_language_model::request::Request {
-                temperature: Some(0.2),
-                stop: vec!["STOP".to_owned()],
-                max_output_tokens: Some(128),
-                ..Default::default()
-            };
-            let model = make_model("gpt-4o");
-            crate::request::encode(&req, &model).unwrap()
-        };
-        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["model"], "gpt-4o");
-        assert!((json["temperature"].as_f64().unwrap() - 0.2).abs() < 1e-6);
-        assert_eq!(json["stop"][0], "STOP");
-        assert_eq!(json["max_tokens"], 128);
-        assert_eq!(json["stream"], false);
-    }
-
-    #[test]
-    fn single_text_part_is_borrowed_not_allocated() {
-        // 单个 Text part 应走 Cow::Borrowed：DTO 里持有 &str，与 IR 的 Arc<str> 同地址。
-        let text: Arc<str> = Arc::from("a fairly long user message");
-        let msg = Arc::new(aa_language_model::request::message::Message::new(
-            aa_language_model::request::message::Role::User,
-            vec![aa_language_model::request::message::ContentPart::Text(
-                text.clone(),
-            )],
-        ));
-        let req = aa_language_model::request::Request {
-            messages: vec![msg],
-            ..Default::default()
-        };
-        let model = make_model("gpt-4o");
-        let body = crate::request::to_chat_completion_request(&req, &model).unwrap();
-        let borrowed = match &body.messages[0] {
-            crate::request::message::ChatMessage::User { content } => content.as_ref(),
-            _ => panic!("expected user message"),
-        };
-        assert!(std::ptr::eq(borrowed.as_ptr(), text.as_ptr()));
-    }
-
-    #[test]
     fn rejects_custom_tools() {
         let req = aa_language_model::request::Request {
             tools: vec![Arc::new(aa_language_model::request::tools::Tool {
@@ -451,11 +341,141 @@ mod tests {
             ..Default::default()
         };
 
-        let model = make_model("gpt-test");
-        let err = crate::request::to_chat_completion_request(&req, &model).unwrap_err();
+        let err =
+            crate::request::to_chat_completion_request(&req, &make_model("gpt-test")).unwrap_err();
         assert!(matches!(
             err,
             aa_language_model::provider::LlmError::Unsupported(_)
         ));
+    }
+
+    // ---------- 响应侧 ----------
+
+    fn parse(json: serde_json::Value) -> crate::response::ChatCompletionResponse {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn unwrap_events(
+        events: Vec<
+            Result<
+                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LlmError,
+            >,
+        >,
+    ) -> Vec<aa_language_model::provider::CompletionEvent> {
+        events.into_iter().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn non_streaming_reports_tool_use_and_length_stop() {
+        // 被截断的一轮：finish_reason=length 必须变成 MaxTokens，而不是 EndTurn。
+        let parsed = parse(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "partial",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": { "name": "read_file", "arguments": "{\"path\":\"a\"}" }
+                    }]
+                },
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 9, "completion_tokens": 4 }
+        }));
+
+        let events = unwrap_events(crate::non_streaming_events(parsed));
+        assert!(matches!(
+            events[0],
+            aa_language_model::provider::CompletionEvent::Text(_)
+        ));
+        assert!(matches!(
+            events[1],
+            aa_language_model::provider::CompletionEvent::ToolUse { .. }
+        ));
+        assert_eq!(
+            events[2],
+            aa_language_model::provider::CompletionEvent::Usage(
+                aa_language_model::provider::TokenUsage {
+                    input_tokens: 9,
+                    output_tokens: 4,
+                }
+            )
+        );
+        assert_eq!(
+            events[3],
+            aa_language_model::provider::CompletionEvent::Stop(
+                aa_language_model::provider::StopReason::MaxTokens
+            )
+        );
+    }
+
+    #[test]
+    fn non_streaming_without_finish_reason_falls_back_to_tool_calls() {
+        // 有些兼容端点不报 finish_reason；有 tool_calls 就当 ToolUse。
+        let parsed = parse(serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": { "name": "read_file", "arguments": "not json" }
+                    }]
+                }
+            }]
+        }));
+
+        let events = unwrap_events(crate::non_streaming_events(parsed));
+        assert_eq!(
+            events[0],
+            aa_language_model::provider::CompletionEvent::ToolUse {
+                id: "call_1".into(),
+                name: "read_file".into(),
+                // 半截/非 JSON 参数保留原文，不吞掉模型输出。
+                input: serde_json::Value::String("not json".into()),
+                is_complete: true,
+            }
+        );
+        assert_eq!(
+            events[1],
+            aa_language_model::provider::CompletionEvent::Stop(
+                aa_language_model::provider::StopReason::ToolUse
+            )
+        );
+    }
+
+    #[test]
+    fn content_filter_finish_reason_is_refusal() {
+        let parsed = parse(serde_json::json!({
+            "choices": [{ "message": { "content": "" }, "finish_reason": "content_filter" }]
+        }));
+        let events = unwrap_events(crate::non_streaming_events(parsed));
+        assert_eq!(
+            events.last(),
+            Some(&aa_language_model::provider::CompletionEvent::Stop(
+                aa_language_model::provider::StopReason::Refusal
+            ))
+        );
+    }
+
+    #[test]
+    fn sse_stream_emits_events_without_buffering_the_body() {
+        let chunks = vec![
+            Ok::<_, reqwest::Error>("data: {\"choices\":[{\"delta\":{\"content\":\"he\"}}]}\n\n".as_bytes().to_vec()),
+            Ok("data: {\"choices\":[{\"delta\":{\"content\":\"llo\"},\"finish_reason\":\"stop\"}]}\n\n".as_bytes().to_vec()),
+            Ok("data: [DONE]\n\n".as_bytes().to_vec()),
+        ];
+
+        let stream = crate::sse_event_stream(futures::stream::iter(chunks));
+        let events = futures::executor::block_on(stream.collect::<Vec<_>>());
+
+        assert_eq!(
+            unwrap_events(events),
+            vec![
+                aa_language_model::provider::CompletionEvent::Text("he".into()),
+                aa_language_model::provider::CompletionEvent::Text("llo".into()),
+                aa_language_model::provider::CompletionEvent::Stop(
+                    aa_language_model::provider::StopReason::EndTurn
+                ),
+            ]
+        );
     }
 }

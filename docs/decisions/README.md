@@ -79,6 +79,7 @@ docs/decisions/
 | [0004](0004-message-layout.md) | `Message` 布局：`Box<[ContentPart]>`、共享靠 `Arc<Message>`、冷数据装箱、压缩用 Segment | accepted（同日修正过内联方案） | 2026-11-12 |
 | [0005](0005-content-part-variants.md) | 加 `RedactedThinking`；原生压缩记录不进 `ContentPart`（走 Segment） | accepted（用户决定） | 2026-11-13 |
 | [0006](0006-wire-request-shape.md) | wire 请求体定型：带 `'a` 的强类型 DTO + 借用序列化；trait 改名 `LanguageModelClient` | proposed（用户方向） | 2026-11-13 |
+| [0007](0007-response-mapping.md) | 响应侧：真解析 SSE、`finish_reason` 决定 `StopReason`、`usage` 与错误体归位 | accepted（方向用户决定） | 2026-11-17 |
 
 ## 相关文档
 

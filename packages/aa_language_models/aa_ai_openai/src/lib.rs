@@ -53,6 +53,7 @@
 //! 我们这里只有后者，因为「注册」那一半属于 `aa_language_models`。
 
 pub mod chat_completion;
+pub mod models;
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -156,6 +157,40 @@ impl OpenAiLanguageModelProvider {
             put(name, value)?;
         }
         Ok(map)
+    }
+
+    /// 列出端点声明的模型（`GET {base_url}/models`）。
+    ///
+    /// 兼容端点的模型名一般只能从这里拿到；返回顺序即端点给的顺序。
+    /// 拿到 `id` 后填进 `aa_language_model::provider::Model::new(provider, id)`。
+    pub async fn list_models(
+        &self,
+    ) -> Result<Vec<crate::models::ModelInfo>, aa_language_model::provider::LlmError> {
+        let headers = self.headers()?;
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .http
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let raw = resp.text().await.unwrap_or_default();
+            return Err(aa_language_model::provider::LlmError::ProviderRejection {
+                status,
+                message: crate::chat_completion::response::error_message(&raw),
+                transient: matches!(status, 408 | 425 | 429 | 500..=599),
+            });
+        }
+
+        let list: crate::models::ModelList = resp
+            .json()
+            .await
+            .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
+        Ok(list.data)
     }
 }
 

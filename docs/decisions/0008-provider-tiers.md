@@ -192,6 +192,9 @@ OpenAiLanguageModelProvider::without_auth()        // 非 Bearer 鉴权（Azure 
   属于兼容端点的扩展，不改变 `aa_ai_openai` 的请求形状；
 - **回放仍不在这一层**：把思考写回下一轮 assistant 消息（DeepSeek 要求）留给厂商 crate；
 - `examples/chat.rs` 是验收入口：只靠 `AA_BASE_URL` / `AA_API_KEY` / `AA_MODEL` /
-  `AA_EXTRA_HEADER_n` 就能逐个试通手里的第三方兼容 API。
+  `AA_EXTRA_HEADER_n` 就能逐个试通手里的第三方兼容 API；
+- `list_models()`（`GET {base_url}/models`）返回端点声明的 `id`，`examples/models.rs`
+  直接打印，用来填 `AA_MODEL`。非 2xx 复用 `error_message` 抽 `error.message`，
+  例如 401 会显示端点要求的鉴权方式（`x-api-key` 或 Bearer）。
 
 「模型表」仍是调用方自己构造 `provider::Model`（可逐字段赋值），尚未提供声明式列表类型。

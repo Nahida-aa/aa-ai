@@ -2,12 +2,12 @@
 //!
 //! **只属于 OpenAI chat completions**：canonical IR 里没有 `role: "tool"`，
 //! 也没有 `tool_calls` 这种「参数是 JSON 字符串」的形状，都由
-//! [`crate::request::to_chat_completion_request`] 现场翻译。
+//! [`crate::chat_completion::request::to_chat_completion_request`] 现场翻译。
 //!
 //! 全部借用：文本用 [`Cow<'a, str>`]（单 part 借 `&'a str`，拼接才分配），
 //! `tool_call_id` / `name` 借用，`arguments` 必须是 JSON **字符串**（OpenAI
 //! 不接受对象）故用 `Cow::Owned`。顶层请求体同样借用，见
-//! [`crate::request::ChatCompletionRequest`]。
+//! [`crate::chat_completion::request::ChatCompletionRequest`]。
 
 use std::borrow::Cow;
 
@@ -43,7 +43,7 @@ pub enum ChatMessage<'a> {
 pub struct ChatToolCall<'a> {
     pub id: Cow<'a, str>,
     #[serde(rename = "type")]
-    pub kind: crate::request::ToolKind,
+    pub kind: crate::chat_completion::request::ToolKind,
     pub function: ChatFunctionCall<'a>,
 }
 

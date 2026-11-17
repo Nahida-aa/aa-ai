@@ -1,6 +1,6 @@
 //! 消息 / 角色 / 内容片段 —— canonical IR 的会话层。
 //!
-//! 布局依据 [`docs/decisions/0004-message-layout.md`](../../../../docs/decisions/0004-message-layout.md)：
+//! 布局依据 [`docs/decisions/0004-message-layout.md`](../../../../../docs/decisions/0004-message-layout.md)：
 //!
 //! - **历史是唯一真相**：外面存 `Vec<Arc<Message>>`，克隆一条历史只加引用计数。
 //! - **片段用 `Box<[ContentPart]>`**：共享单位是 `Arc<Message>`，`content` 不需要第二层
@@ -10,7 +10,7 @@
 //!   编译失败 —— 大字段必须 `Arc` 或装箱。
 //!
 //! 为什么内容片段是穷尽 enum 而不是 `struct { text: Option<_>, .. }`：见
-//! [`docs/decisions/0001-ir-layering.md`](../../../../docs/decisions/0001-ir-layering.md)。
+//! [`docs/decisions/0001-ir-layering.md`](../../../../../docs/decisions/0001-ir-layering.md)。
 //! 简言之：封闭语义用 enum（编译器逼所有 provider 处理新变体），开放实现用 `dyn`。
 //!
 //! 命名对齐 Zed 的 `LanguageModelRequestMessage`：字段叫 `content`（不是 `parts`），

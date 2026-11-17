@@ -63,7 +63,7 @@ aa_agent ──> aa_language_model
 | 做法 | 例子 | 结论 |
 |---|---|---|
 | 写完整路径 | `aa_language_model::request::Request` | ✅ |
-| 同 crate 内写完整路径 | `crate::request::message::ContentPart` | ✅ |
+| 同 crate 内写完整路径 | `crate::chat_completion::request::message::ChatMessage` | ✅ |
 | 导入模块，写 `模块::类型` | `use aa_language_model::request;` → `request::Request` | ❌ 前缀被截断 |
 | 导入具体类型后用裸名 | `use aa_language_model::request::Request;` → `Request` | ❌ 完全丢命名空间 |
 | 用长前缀把域写进类型名 | `LanguageModelRequest` / `LanguageModelRequestMessage` | ❌ |
@@ -132,14 +132,17 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
 1. `packages/aa_language_models/aa_ai_<name>/`（`cargo new --lib`），`Cargo.toml`
    写 `aa_language_model.workspace = true` + `reqwest` / `futures` / `serde` /
    `serde_json`，全部 `.workspace = true`。
-2. `src/request/mod.rs`：顶层请求体 + 借用式 encoder
+2. **按接口/协议分组**，一个协议一个目录，请求与响应成对：
+   `src/chat_completion/mod.rs`（只声明子模块）下
+   `src/chat_completion/request/mod.rs`：顶层请求体 + 借用式 encoder
    （`to_<wire>_request(&aa_language_model::request::Request, model_id)
    -> Result<Wire, aa_language_model::provider::LlmError>`）；
-   `src/request/message.rs`：消息层 DTO（`role` 形状、工具调用片段）。
-   参照 `aa_ai_openai`。
-3. `src/lib.rs`：只放 client 本体 ——
-   `impl aa_language_model::provider::LanguageModelClient for <Name>LanguageModelProvider`
-   + 响应 DTO（私有）。
+   `src/chat_completion/request/message.rs`：消息层 DTO（`role` 形状、工具调用片段）；
+   `src/chat_completion/response/mod.rs`：响应 body / SSE chunk / 错误 body + 映射。
+   参照 `aa_ai_openai`。将来接 Responses API 就是并列的 `src/responses/`，
+   两套协议不共享结构体（请求侧只 `Serialize`、响应侧只 `Deserialize`）。
+3. `src/lib.rs`：只放 client 本体 +
+   `impl aa_language_model::provider::LanguageModelClient for <Name>LanguageModelProvider`。
 4. 根 `Cargo.toml`：`members` 和 `[workspace.dependencies]` 各加一行。
 5. `aa_language_models/src/lib.rs`：加一个
    `pub mod <name> { pub use aa_ai_<name>::<Name>LanguageModelProvider; }`。

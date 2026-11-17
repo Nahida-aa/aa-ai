@@ -1,16 +1,19 @@
 //! OpenAI（或 OpenAI 兼容端点）provider：真连 LLM 服务器。
 //!
 //! 本 crate 只负责 **OpenAI 的 wire 形状**：
-//! - [`request`]：请求 wire DTO（借用 canonical IR）+ 编码器
+//! - [`chat_completion::request`]：请求 wire DTO（借用 canonical IR）+ 编码器
 //!   （`to_chat_completion_request` 产出借用 DTO，`encode` 用 `to_writer` 写成 owned 字节）；
-//! - [`response`]：响应 DTO（非流式 / SSE chunk / 错误 body）+ `finish_reason`、`usage`
-//!   映射 + `StreamDecoder`；
+//! - [`chat_completion::response`]：响应 DTO（非流式 / SSE chunk / 错误 body）+
+//!   `finish_reason`、`usage` 映射 + `StreamDecoder`；
 //! - [`OpenAiLanguageModelProvider`]：HTTP 调用 + 响应 → `CompletionEvent`。
+//!
+//! 目录按**接口**分组：`chat_completion/` 是 `/chat/completions` 的请求 + 响应；
+//! 将来接 Responses API 就并列加 `responses/`，两套协议不共用结构体。
 //!
 //! 两种模式：`request.stream == false` 时读整个 JSON body；`true` 时读
 //! `text/event-stream`，逐帧产出 `Text` / `ToolUse`（按 `index` 归并增量）/ `Usage` /
 //! `Stop`。两条路径都从 `finish_reason` 得出 `StopReason`（见
-//! [`docs/decisions/0007-response-mapping.md`](../../../../../docs/decisions/0007-response-mapping.md)）。
+//! [`docs/decisions/0007-response-mapping.md`](../../../docs/decisions/0007-response-mapping.md)）。
 //!
 //! canonical IR 和 `LanguageModelClient` trait 在 `aa_language_model`：core 不依赖 `reqwest`，
 //! 加一家 provider = 新增一个 crate，不动 core。这与 Zed 的
@@ -23,8 +26,7 @@
 //! 既实现 `LanguageModelProvider`（注册）又实现 `LanguageModelClient`（发请求），
 //! 我们这里只有后者，因为「注册」那一半属于 `aa_language_models`。
 
-pub mod request;
-pub mod response;
+pub mod chat_completion;
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -77,7 +79,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
     > {
         // 先同步把借用式 wire DTO 写成 owned 字节；`'a` 到此终结，不进 future。
         // 每请求选择（stream 等）来自 `Request`，静态能力位来自 `Model`（0006 D4 / A 方案）。
-        let body = match crate::request::encode(request, model) {
+        let body = match crate::chat_completion::request::encode(request, model) {
             Ok(bytes) => bytes,
             Err(err) => return Box::pin(async move { Err(err) }),
         };
@@ -104,7 +106,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
                 let err = aa_language_model::provider::LlmError::ProviderRejection {
                     status,
                     // 只取 `error.message`，不要把整段 JSON / HTML 塞给上层。
-                    message: crate::response::error_message(&raw),
+                    message: crate::chat_completion::response::error_message(&raw),
                     transient: matches!(status, 408 | 425 | 429 | 500..=599),
                 };
                 return Ok(stream::once(async move { Err(err) }).boxed());
@@ -115,7 +117,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
                 return Ok(sse_event_stream(resp.bytes_stream()));
             }
 
-            let parsed: crate::response::ChatCompletionResponse = resp
+            let parsed: crate::chat_completion::response::ChatCompletionResponse = resp
                 .json()
                 .await
                 .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
@@ -126,7 +128,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
 
 /// 非流式 body → 事件列表（最后一项是 `Stop`）。
 fn non_streaming_events(
-    parsed: crate::response::ChatCompletionResponse,
+    parsed: crate::chat_completion::response::ChatCompletionResponse,
 ) -> Vec<Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>>
 {
     use aa_language_model::provider::CompletionEvent;
@@ -158,7 +160,7 @@ fn non_streaming_events(
         events.push(Ok(CompletionEvent::Usage(usage.to_canonical())));
     }
     events.push(Ok(CompletionEvent::Stop(
-        crate::response::final_stop_reason(finish_reason, has_tool_calls),
+        crate::chat_completion::response::final_stop_reason(finish_reason, has_tool_calls),
     )));
     events
 }
@@ -182,7 +184,7 @@ where
 {
     struct State<S> {
         inner: Pin<Box<S>>,
-        decoder: crate::response::StreamDecoder,
+        decoder: crate::chat_completion::response::StreamDecoder,
         pending: VecDeque<
             Result<
                 aa_language_model::provider::CompletionEvent,
@@ -195,7 +197,7 @@ where
 
     let state = State {
         inner: Box::pin(inner),
-        decoder: crate::response::StreamDecoder::default(),
+        decoder: crate::chat_completion::response::StreamDecoder::default(),
         pending: VecDeque::new(),
         ended: false,
     };
@@ -294,7 +296,8 @@ mod tests {
         };
 
         let model = make_model("gpt-test");
-        let body = crate::request::to_chat_completion_request(&req, &model).unwrap();
+        let body =
+            crate::chat_completion::request::to_chat_completion_request(&req, &model).unwrap();
         let json = serde_json::to_value(&body).unwrap();
 
         assert_eq!(json["model"], "gpt-test");
@@ -341,8 +344,11 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            crate::request::to_chat_completion_request(&req, &make_model("gpt-test")).unwrap_err();
+        let err = crate::chat_completion::request::to_chat_completion_request(
+            &req,
+            &make_model("gpt-test"),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             aa_language_model::provider::LlmError::Unsupported(_)
@@ -351,7 +357,7 @@ mod tests {
 
     // ---------- 响应侧 ----------
 
-    fn parse(json: serde_json::Value) -> crate::response::ChatCompletionResponse {
+    fn parse(json: serde_json::Value) -> crate::chat_completion::response::ChatCompletionResponse {
         serde_json::from_value(json).unwrap()
     }
 

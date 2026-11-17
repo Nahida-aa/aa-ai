@@ -242,8 +242,8 @@ pub struct Request {
 - `Message` / `ContentPart` **不实现 `serde`**：wire 形状是 provider 的私有契约，
   canonical IR 暂不承诺序列化格式。
 - **OpenAI wire body 是强类型结构体**：`ChatCompletionRequest` / `ChatMessage` 等
-  只存在于 `aa_ai_openai::request`，由
-  `aa_ai_openai::request::to_chat_completion_request(&Request, model_id)`
+  只存在于 `aa_ai_openai::chat_completion::request`，由
+  `aa_ai_openai::chat_completion::request::to_chat_completion_request(&Request, model_id)`
   生成（借用而非消费；Zed 对应的 `into_open_ai` 是 `into_`，因为它的请求历史是 owned）。
   字段写错在编译期失败，而不是等 JSON 被服务端拒绝。
 

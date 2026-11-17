@@ -14,7 +14,7 @@
 
 ## 背景与问题
 
-讨论 `aa_ai_openai::request::ChatCompletionRequest` 「缺字段」时暴露出三个未定型的设计点，
+讨论 `aa_ai_openai::chat_completion::request::ChatCompletionRequest` 「缺字段」时暴露出三个未定型的设计点，
 现有代码（`packages/` 全部尚未提交，属草稿）都不能作为约定：
 
 1. **wire 请求体是 owned 还是借用？** 0002 D2、`crate-layout.md:135,159` 都要求「借用式
@@ -73,7 +73,7 @@ Zed 的 trait 叫 `LanguageModelClient`（`crates/language_model/src/language_mo
 |---|---|---|
 | 全列进静态 struct | 把 OpenAI API 字段尽量列全 | Zed `crates/open_ai/src/open_ai.rs:735-762`（15 个字段，但只用得到的子集） |
 | 动态 `Value` 表 + 扩展口 | `Map<String, Value>` + `additional_params`/`extra_body` | rig `completion/options/merge.rs:27`（`FinalBody`）、genai `adapter_shared.rs:128`（`json!` + `x_merge`） |
-| **强类型 struct 列到实际需要的字段 + 能力/请求分层** | wire 私有类型放 `aa_ai_openai::request`，每请求选择放 `Request`、静态能力位放 `Model`（见 D4） | Zed |
+| **强类型 struct 列到实际需要的字段 + 能力/请求分层** | wire 私有类型放 `aa_ai_openai::chat_completion::request`，每请求选择放 `Request`、静态能力位放 `Model`（见 D4） | Zed |
 
 0004 已选「强类型、编译期失败」，故不走动态 `Value` 表。
 
@@ -142,7 +142,7 @@ Zed 的 trait 叫 `LanguageModelClient`（`crates/language_model/src/language_mo
 
 ### 关于 `RequestOptions`（核实结论）
 
-助手初版自造了一个 `aa_ai_openai::request::RequestOptions` 聚合能力参数，并写成
+助手初版自造了一个 `aa_ai_openai::chat_completion::request::RequestOptions` 聚合能力参数，并写成
 「对齐 Zed」。经核实**四家都没有这个类型**，该说法不成立：
 
 | 库 | 能力/参数放在哪 |
@@ -182,7 +182,7 @@ Zed 的 trait 叫 `LanguageModelClient`（`crates/language_model/src/language_mo
 ### D3：core 的 `ToolChoice` / `ResponseFormat` 保留在 core（用户决定，Q2「留」）
 
 - 依据 Zed 先例（策略枚举在 `language_model_core`）；wire 私有形状
-  （`ChatToolChoice` / `ChatResponseFormat` 等）留在 `aa_ai_openai::request`。
+  （`ChatToolChoice` / `ChatResponseFormat` 等）留在 `aa_ai_openai::chat_completion::request`。
 - 注：这两个类型是「策略语义」，不是 wire 字段；本次「缺字段」指 wire DTO 的字段表，
   两者不混。
 
@@ -217,7 +217,7 @@ Zed 的 trait 叫 `LanguageModelClient`（`crates/language_model/src/language_mo
   `StreamOptions { include_usage: bool }` + `completion.rs:205-209` 的
   `if stream { Some(default()) }`）。详见「验证 / `stream_options` 的写法」。
 - wire 私有类型（`ChatToolChoice`、`ChatResponseFormat`、`StreamOptions`、
-  `ToolKind`、`ChatMessage` 一族）全部放 `aa_ai_openai::request`；
+  `ToolKind`、`ChatMessage` 一族）全部放 `aa_ai_openai::chat_completion::request`；
   `ReasoningEffort` / `ServiceTier` 因属于跨 provider 的能力枚举，放 core
   `provider` 并 derive `Serialize`（wire 直接复用），core 仍不认识任何厂商 JSON 字段名
   （`crate-layout.md:38`）。

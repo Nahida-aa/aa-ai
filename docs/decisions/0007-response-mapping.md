@@ -63,7 +63,7 @@ OpenAI 的流以 `data: [DONE]` 收尾；`finish_reason` 在**最后一条带 ch
 
 ### D1：真解析 SSE（用户决定）
 
-- 新增 `aa_ai_openai::response::StreamDecoder`：只做 SSE 分帧 + JSON 解码，
+- 新增 `aa_ai_openai::chat_completion::response::StreamDecoder`：只做 SSE 分帧 + JSON 解码，
   **不碰 HTTP**，所以能单测（喂字节、拿事件）。
 - 行缓冲保留未完成的行：TCP 把一帧切在任意字节处都能拼回来（有测试）。
 - 支持 `\r\n`、注释行 `:`、`event:` / `id:` / `retry:` 行（忽略）；`data:` 后的单个空格

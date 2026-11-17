@@ -8,7 +8,7 @@
 //! - 流式用 `text/event-stream`：`data: {...}` 逐帧解析，`[DONE]` 收尾。
 //!
 //! 这里只有**反序列化**用的类型（`Deserialize`），请求侧在
-//! [`crate::request`]，两边不共享结构体。
+//! [`crate::chat_completion::request`]，两边不共享结构体。
 
 use std::collections::BTreeMap;
 

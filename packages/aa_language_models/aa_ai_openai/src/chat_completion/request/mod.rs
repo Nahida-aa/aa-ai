@@ -1,7 +1,7 @@
 //! OpenAI chat completions 的**请求** wire 形状 + canonical → wire 的编码器。
 //!
 //! 只记 OpenAI 的说法，不试图兼容其他厂商：加一家 = 新增一个 `aa_ai_<name>` crate，
-//! 各自写自己的 `request` 模块。
+//! 各自写自己的 `chat_completion/request`（按协议分组，见 [`crate::chat_completion`]）。
 //!
 //! 模块划分：
 //! - [`message`]：`role` 的四种形状、`tool_calls` 片段；
@@ -27,7 +27,7 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct ChatCompletionRequest<'a> {
     pub model: &'a str,
-    pub messages: Vec<crate::request::message::ChatMessage<'a>>,
+    pub messages: Vec<crate::chat_completion::request::message::ChatMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     /// 旧模型的输出上限。与 `max_completion_tokens` 二选一，由模型能力决定。
@@ -165,16 +165,18 @@ pub fn to_chat_completion_request<'a>(
                 ..
             } = part
             {
-                messages.push(crate::request::message::ChatMessage::Tool {
-                    tool_call_id: Cow::Borrowed(call_id),
-                    content: tool_result_text(content),
-                });
+                messages.push(
+                    crate::chat_completion::request::message::ChatMessage::Tool {
+                        tool_call_id: Cow::Borrowed(call_id),
+                        content: tool_result_text(content),
+                    },
+                );
             }
         }
 
         // 文本：单 part 借用，多 part 才分配拼接。
         let mut text: Option<Cow<'a, str>> = None;
-        let mut calls: Vec<crate::request::message::ChatToolCall<'a>> = Vec::new();
+        let mut calls: Vec<crate::chat_completion::request::message::ChatToolCall<'a>> = Vec::new();
         for part in msg.content() {
             match part {
                 aa_language_model::request::message::ContentPart::Text(t) => {
@@ -187,10 +189,10 @@ pub fn to_chat_completion_request<'a>(
                     });
                 }
                 aa_language_model::request::message::ContentPart::ToolCall { id, name, input } => {
-                    calls.push(crate::request::message::ChatToolCall {
+                    calls.push(crate::chat_completion::request::message::ChatToolCall {
                         id: Cow::Borrowed(id),
                         kind: ToolKind::Function,
-                        function: crate::request::message::ChatFunctionCall {
+                        function: crate::chat_completion::request::message::ChatFunctionCall {
                             name: Cow::Borrowed(name),
                             // OpenAI 要求参数是 JSON 字符串：这一处必须分配。
                             arguments: Cow::Owned(input.to_wire_string()),
@@ -214,17 +216,17 @@ pub fn to_chat_completion_request<'a>(
 
         messages.push(match msg.role() {
             aa_language_model::request::message::Role::System => {
-                crate::request::message::ChatMessage::System {
+                crate::chat_completion::request::message::ChatMessage::System {
                     content: text.unwrap_or(Cow::Borrowed("")),
                 }
             }
             aa_language_model::request::message::Role::User => {
-                crate::request::message::ChatMessage::User {
+                crate::chat_completion::request::message::ChatMessage::User {
                     content: text.unwrap_or(Cow::Borrowed("")),
                 }
             }
             aa_language_model::request::message::Role::Assistant => {
-                crate::request::message::ChatMessage::Assistant {
+                crate::chat_completion::request::message::ChatMessage::Assistant {
                     content: text,
                     tool_calls: calls,
                 }

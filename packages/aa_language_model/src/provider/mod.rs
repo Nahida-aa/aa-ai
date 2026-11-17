@@ -34,7 +34,7 @@ pub type EventStream = futures::stream::BoxStream<'static, Result<CompletionEven
 /// **不含 agent loop**：它只发一个 `Request`、收回流式 `CompletionEvent`。
 /// 工具循环（收 `ToolUse` → 执行工具 → 回填 → 再发）由 `aa_agent` 的 loop 做。
 ///
-/// 签名按 [0006](../../../docs/decisions/0006-wire-request-shape.md) D2 重新设计：
+/// 签名按 [0006](../../../../docs/decisions/0006-wire-request-shape.md) D2 重新设计：
 /// 返回的 future 是 `'static`，**不借用 `self` / `model` / `request`**。实现者必须
 /// 在构造 future **之前**同步把 `request` 编码成 owned 字节（`to_writer`），
 /// 只把字节与所需的 owned 配置 move 进 future。这样借用式 wire DTO 的 `'a`

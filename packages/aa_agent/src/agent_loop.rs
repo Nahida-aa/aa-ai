@@ -190,8 +190,13 @@ mod tests {
             &self,
             _model: &provider::Model,
             request: &request::Request,
-        ) -> Pin<Box<dyn Future<Output = Result<provider::EventStream, provider::LlmError>> + Send + 'static>>
-        {
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<provider::EventStream, provider::LlmError>>
+                    + Send
+                    + 'static,
+            >,
+        > {
             self.seen.lock().unwrap().push(request.clone());
             let events = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
             Box::pin(async move { Ok(stream::iter(events.into_iter().map(Ok)).boxed()) })

@@ -15,6 +15,32 @@
 //! `Stop`。两条路径都从 `finish_reason` 得出 `StopReason`（见
 //! [`docs/decisions/0007-response-mapping.md`](../../../docs/decisions/0007-response-mapping.md)）。
 //!
+//! # 作为库：一个实例 = 一份端点配置
+//!
+//! 和 Zed 不同，这里没有全局 settings / 注册表 / 热重载（那是应用的职责）。库只提供
+//! **数据化的端点配置**，调用方按自己的配置文件构造实例：
+//!
+//! ```no_run
+//! use aa_ai_openai::OpenAiLanguageModelProvider;
+//!
+//! let provider = OpenAiLanguageModelProvider::new("sk-...")
+//!     .with_base_url("https://api.example.com/v1")
+//!     .with_header("HTTP-Referer", "https://app.example.com")
+//!     .with_header("X-Title", "my-app");
+//! // 本地无鉴权端点：
+//! let local = OpenAiLanguageModelProvider::without_auth()
+//!     .with_base_url("http://localhost:11434/v1");
+//! // 非 Bearer 鉴权（Azure 式）：
+//! let azure = OpenAiLanguageModelProvider::without_auth()
+//!     .with_auth_header("api-key", "secret");
+//! ```
+//!
+//! 这就是「长尾兼容端点」那一档（[ADR 0008]）：端点、鉴权、额外 header、模型表都是
+//! 数据，不需要写 crate。有硬差异的常见厂商（思考回放、`response_format` 范围、
+//! `[DONE]` 语义）仍各开 `aa_ai_<vendor>`。
+//!
+//! [ADR 0008]: ../../../docs/decisions/0008-provider-tiers.md
+//!
 //! canonical IR 和 `LanguageModelClient` trait 在 `aa_language_model`：core 不依赖 `reqwest`，
 //! 加一家 provider = 新增一个 crate，不动 core。这与 Zed 的
 //! `language_model_core` + `open_ai` / `anthropic` / `google_ai` 布局一致。
@@ -35,27 +61,101 @@ use std::pin::Pin;
 use futures::StreamExt;
 use futures::stream;
 
+/// 鉴权方式（wire 细节，只有本 crate 关心）。
+enum Auth {
+    /// `Authorization: Bearer <key>`（OpenAI 与多数兼容端点）。
+    Bearer(String),
+    /// 自定义鉴权 header（Azure 的 `api-key` 等）。
+    Header { name: String, value: String },
+    /// 不带鉴权（本地 Ollama / vLLM / LM Studio）。
+    None,
+}
+
 /// OpenAI / OpenAI 兼容端点的 provider。
 pub struct OpenAiLanguageModelProvider {
-    api_key: String,
-    /// 默认 `https://api.openai.com/v1`；可指向 Ollama / vLLM 等兼容端点。
+    auth: Auth,
+    /// 默认 `https://api.openai.com/v1`；可指向 Ollama / vLLM / 第三方网关。
     base_url: String,
+    /// 额外请求 header（`(name, value)`，按顺序追加，同名后者覆盖前者）。
+    headers: Vec<(String, String)>,
     http: reqwest::Client,
 }
 
 impl OpenAiLanguageModelProvider {
+    /// 用 Bearer 鉴权构造。
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            api_key: api_key.into(),
+            auth: Auth::Bearer(api_key.into()),
             base_url: "https://api.openai.com/v1".into(),
+            headers: Vec::new(),
             http: reqwest::Client::new(),
         }
     }
 
-    /// 指向 OpenAI 兼容端点（Ollama / vLLM / 自托管）。
+    /// 不发送 `Authorization`（本地或网关自带鉴权时用）。
+    ///
+    /// 不要用 `new("")` 代替：那会发出空的 `Authorization: Bearer `，部分端点会 400。
+    pub fn without_auth() -> Self {
+        Self {
+            auth: Auth::None,
+            base_url: "https://api.openai.com/v1".into(),
+            headers: Vec::new(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    /// 指向 OpenAI 兼容端点（Ollama / vLLM / 自托管 / 第三方网关）。
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
+    }
+
+    /// 用自定义 header 鉴权，替换默认的 `Authorization: Bearer`。
+    pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.auth = Auth::Header {
+            name: name.into(),
+            value: value.into(),
+        };
+        self
+    }
+
+    /// 追加一个请求 header（OpenRouter 的 `HTTP-Referer` / `X-Title` 等）。
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// 把鉴权与额外 header 变成 `HeaderMap`。
+    ///
+    /// 在进入 future 之前同步调用：非法 header 名/值直接变成错误，不 panic、不发请求。
+    fn headers(&self) -> Result<reqwest::header::HeaderMap, aa_language_model::provider::LlmError> {
+        let mut map = reqwest::header::HeaderMap::new();
+        let mut put = |name: &str, value: &str| {
+            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+                aa_language_model::provider::LlmError::Transport(format!(
+                    "invalid request header name {name:?}: {e}"
+                ))
+            })?;
+            let value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+                aa_language_model::provider::LlmError::Transport(format!(
+                    "invalid request header value for {name:?}: {e}"
+                ))
+            })?;
+            map.insert(name, value);
+            Ok::<(), aa_language_model::provider::LlmError>(())
+        };
+
+        put("Content-Type", "application/json")?;
+        match &self.auth {
+            Auth::Bearer(key) => put("Authorization", &format!("Bearer {key}"))?,
+            Auth::Header { name, value } => put(name, value)?,
+            Auth::None => {}
+        }
+        // 用户 header 放最后：同名时覆盖上面的默认值。
+        for (name, value) in &self.headers {
+            put(name, value)?;
+        }
+        Ok(map)
     }
 }
 
@@ -86,15 +186,18 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
         let wants_stream = request.stream;
 
         // future 需要的全部东西都先变成 owned，才能是 `'static`。
+        // header 在这里同步构造：非法配置直接返回错误，不进 future、不发请求。
+        let headers = match self.headers() {
+            Ok(headers) => headers,
+            Err(err) => return Box::pin(async move { Err(err) }),
+        };
         let http = self.http.clone();
-        let url = format!("{}/chat/completions", self.base_url);
-        let api_key = self.api_key.clone();
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         Box::pin(async move {
             let resp = http
                 .post(url)
-                .bearer_auth(api_key)
-                .header("Content-Type", "application/json")
+                .headers(headers)
                 .body(body)
                 .send()
                 .await
@@ -139,6 +242,13 @@ fn non_streaming_events(
 
     if let Some(choice) = parsed.choices.first() {
         finish_reason = choice.finish_reason.as_deref();
+        // 兼容端点的非流式思考：先于文本产出（DeepSeek 等）。
+        if let Some(reasoning) = choice.message.reasoning() {
+            events.push(Ok(CompletionEvent::Reasoning {
+                text: reasoning.to_owned(),
+                signature: None,
+            }));
+        }
         if let Some(text) = &choice.message.content
             && !text.is_empty()
         {
@@ -483,5 +593,53 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn endpoint_configuration_is_data_not_code() {
+        let provider = crate::OpenAiLanguageModelProvider::new("sk-test")
+            .with_base_url("https://api.example.com/v1/")
+            .with_header("HTTP-Referer", "https://app.example.com")
+            .with_header("X-Title", "aa-ai");
+        let headers = provider.headers().unwrap();
+        assert_eq!(
+            headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer sk-test"
+        );
+        assert_eq!(
+            headers.get("http-referer").unwrap().to_str().unwrap(),
+            "https://app.example.com"
+        );
+        assert_eq!(headers.get("x-title").unwrap().to_str().unwrap(), "aa-ai");
+        assert_eq!(
+            headers.get("content-type").unwrap().to_str().unwrap(),
+            "application/json"
+        );
+
+        // 无鉴权时不发 Authorization；自定义 header 鉴权替换 Bearer。
+        let provider = crate::OpenAiLanguageModelProvider::without_auth();
+        assert!(provider.headers().unwrap().get("authorization").is_none());
+
+        let provider = crate::OpenAiLanguageModelProvider::without_auth()
+            .with_auth_header("api-key", "secret");
+        assert_eq!(
+            provider
+                .headers()
+                .unwrap()
+                .get("api-key")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "secret"
+        );
+    }
+
+    #[test]
+    fn invalid_header_is_an_error_not_a_panic() {
+        let provider = crate::OpenAiLanguageModelProvider::new("k").with_header("bad header", "x");
+        assert!(matches!(
+            provider.headers(),
+            Err(aa_language_model::provider::LlmError::Transport(_))
+        ));
     }
 }

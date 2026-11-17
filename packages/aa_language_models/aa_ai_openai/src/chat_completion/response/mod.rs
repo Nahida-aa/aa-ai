@@ -7,6 +7,13 @@
 //! - 非 2xx / 流内 `{"error":...}` 都抽 `error.message`，不再把整个 body 塞进错误；
 //! - 流式用 `text/event-stream`：`data: {...}` 逐帧解析，`[DONE]` 收尾。
 //!
+//! **兼容端点的思考字段**：OpenAI 官方 chat completions 不返回思考，但大量
+//! OpenAI 兼容端点在同一位置塞 `reasoning_content`（DeepSeek / Qwen / GLM / Kimi /
+//! 多数 vLLM、SGLang）、`reasoning`（部分网关）、`reasoning_text`（GitHub Copilot）。
+//! 这里把三者都映射成 `CompletionEvent::Reasoning`，字段缺失的纯 OpenAI 端点不受影响。
+//! 参照 TanStack `ai-openai/src/compatible/adapter.ts:52` 的 `extractReasoning`。
+//! **回放**（把思考写回下一轮 assistant 消息）不属于 OpenAI 形状，留在厂商 crate。
+//!
 //! 这里只有**反序列化**用的类型（`Deserialize`），请求侧在
 //! [`crate::chat_completion::request`]，两边不共享结构体。
 
@@ -41,6 +48,27 @@ pub struct ResponseMessage {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<ResponseToolCall>,
+    /// 兼容端点的思考字段（非流式）。三者按优先级取第一个非空值。
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_text: Option<String>,
+}
+
+impl ResponseMessage {
+    /// 兼容端点的思考文本：`reasoning_content` → `reasoning` → `reasoning_text`。
+    pub fn reasoning(&self) -> Option<&str> {
+        [
+            self.reasoning_content.as_deref(),
+            self.reasoning.as_deref(),
+            self.reasoning_text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|text| !text.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +133,27 @@ pub struct Delta {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<DeltaToolCall>,
+    /// 兼容端点的思考字段（流式），优先级同非流式。
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_text: Option<String>,
+}
+
+impl Delta {
+    /// 本帧的思考增量：`reasoning_content` → `reasoning` → `reasoning_text`。
+    pub fn reasoning(&self) -> Option<&str> {
+        [
+            self.reasoning_content.as_deref(),
+            self.reasoning.as_deref(),
+            self.reasoning_text.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|text| !text.is_empty())
+    }
 }
 
 /// 流式 tool call 的一个分片：`id`/`name` 只在第一片出现，`arguments` 逐片累加。
@@ -376,6 +425,13 @@ impl StreamDecoder {
         }
 
         for choice in &chunk.choices {
+            // 兼容端点的思考增量先于文本（DeepSeek 等按这个顺序发）。
+            if let Some(reasoning) = choice.delta.reasoning() {
+                out.push(Ok(CompletionEvent::Reasoning {
+                    text: reasoning.to_owned(),
+                    signature: None,
+                }));
+            }
             if let Some(content) = &choice.delta.content
                 && !content.is_empty()
             {
@@ -436,6 +492,63 @@ mod tests {
             vec![
                 CompletionEvent::Text("Hel".into()),
                 CompletionEvent::Text("lo".into()),
+                CompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn compatible_reasoning_fields_become_reasoning_events() {
+        // 三个兼容字段都认；同一帧里 content 与思考并存时，思考先出。
+        let events = decode(&[
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thin\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"king\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_text\":\"!\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\",\"content\":\"hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::Reasoning {
+                    text: "thin".into(),
+                    signature: None,
+                },
+                CompletionEvent::Reasoning {
+                    text: "king".into(),
+                    signature: None,
+                },
+                CompletionEvent::Reasoning {
+                    text: "!".into(),
+                    signature: None,
+                },
+                CompletionEvent::Text("hi".into()),
+                CompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn non_streaming_reasoning_content_is_mapped_before_text() {
+        let parsed: super::ChatCompletionResponse = serde_json::from_str(
+            r#"{"choices":[{"message":{"reasoning_content":"think","content":"answer"},
+                "finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+        let events: Vec<_> = crate::non_streaming_events(parsed)
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            events,
+            vec![
+                CompletionEvent::Reasoning {
+                    text: "think".into(),
+                    signature: None,
+                },
+                CompletionEvent::Text("answer".into()),
                 CompletionEvent::Stop(StopReason::EndTurn),
             ]
         );

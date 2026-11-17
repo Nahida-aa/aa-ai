@@ -159,9 +159,39 @@ pub enum CompletionEvent {
 
 ## 未做
 
-- 长尾层的数据类型（`ProviderConfig { base_url, auth, headers, models }`）尚未设计，
-  现在只有 `OpenAiLanguageModelProvider::with_base_url`。
+- 长尾层的声明式类型（可序列化的 `ProviderConfig { base_url, auth, headers, models }`）
+  尚未设计；现在用 provider 的构造数据承担（见附录）。
 - `aa_ai_openai` 的 encoder 尚未按 `Model::supports_tools` / `uses_developer_role` /
   `supports_images` 筛字段。
 - `verbosity` / `prompt_cache_retention` / `reasoning_details` 仍按 0007「未做」处理。
 - `aa_ai_ollama` 是否保留原生 `/api/chat` crate，还是并入长尾数据层，待接第二家时定。
+
+## 附录：长尾层的第一版实现（2026-11-17）
+
+不改上面的决策，只记录落地形状。「长尾端点」暂时由
+`aa_ai_openai::OpenAiLanguageModelProvider` 的构造数据承担，没有新增类型：
+
+```rust
+OpenAiLanguageModelProvider::new("sk-...")        // Authorization: Bearer
+    .with_base_url("https://api.example.com/v1")  // 去掉尾斜杠
+    .with_header("HTTP-Referer", "...")           // 追加 header，同名覆盖默认
+    .with_header("X-Title", "...");
+
+OpenAiLanguageModelProvider::without_auth()        // 不发 Authorization（本地端点）
+    .with_base_url("http://localhost:11434/v1");
+
+OpenAiLanguageModelProvider::without_auth()        // 非 Bearer 鉴权（Azure 式）
+    .with_auth_header("api-key", "secret");
+```
+
+- header 在进入 future 之前同步构造，非法名字/值返回 `LlmError::Transport`，不 panic；
+- `new("")` 会发空的 `Bearer `，所以「无鉴权」必须用 `without_auth()`（写进文档）；
+- **兼容端点的思考**：响应 DTO 同时认 `reasoning_content` / `reasoning` /
+  `reasoning_text`，映射成 `CompletionEvent::Reasoning`（依据 TanStack
+  `ai-openai/src/compatible/adapter.ts:52`）。这三个字段出现在 OpenAI 形状的同一位置，
+  属于兼容端点的扩展，不改变 `aa_ai_openai` 的请求形状；
+- **回放仍不在这一层**：把思考写回下一轮 assistant 消息（DeepSeek 要求）留给厂商 crate；
+- `examples/chat.rs` 是验收入口：只靠 `AA_BASE_URL` / `AA_API_KEY` / `AA_MODEL` /
+  `AA_EXTRA_HEADER_n` 就能逐个试通手里的第三方兼容 API。
+
+「模型表」仍是调用方自己构造 `provider::Model`（可逐字段赋值），尚未提供声明式列表类型。

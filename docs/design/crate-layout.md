@@ -13,23 +13,43 @@
 
 ## 1. 一句话
 
-**IR + trait 在 core；一家 provider 一个 crate；命名 = 命名空间 + 短类型名。**
+**IR + trait 在 core；一个协议一个 crate；常见厂商也是一家一个 crate；命名 = 命名空间 + 短类型名。**
+
+> 三层划分见 [ADR 0008](../decisions/0008-provider-tiers.md)：
+> **协议**（wire 形状）→ **常见厂商**（一家一 crate，差异逐条写）→
+> **长尾端点**（运行时数据，不开 crate）。
 
 ## 2. crate 布局
 
 | crate | 路径 | 职责 | 依赖 |
 |---|---|---|---|
-| `aa_language_model` | `packages/aa_language_model/` | canonical IR（`request::*`）+ `provider::LanguageModelClient` trait / 错误 / 事件 | 无网络依赖 |
-| `aa_ai_openai` | `packages/aa_language_models/aa_ai_openai/` | OpenAI 的 wire DTO + encoder + HTTP 客户端 | core + `reqwest` |
-| `aa_ai_anthropic`（待建） | `packages/aa_language_models/aa_ai_anthropic/` | 同上，Anthropic 形状 | core + `reqwest` |
+| `aa_language_model` | `packages/aa_language_model/` | canonical IR（`request::*`）+ `provider::LanguageModelClient` trait / 错误 / 事件 / `Model` | 无网络依赖 |
+| `aa_ai_openai` | `packages/aa_language_models/aa_ai_openai/` | OpenAI Chat Completions 的 wire DTO + encoder + HTTP 客户端 | core + `reqwest` |
+| `aa_ai_deepseek`（待建） | `packages/aa_language_models/aa_ai_deepseek/` | 常见厂商：自有 encoder，差异写在自己 crate 里 | core + `reqwest`（可按需复用 `aa_ai_openai` 的 DTO） |
+| `aa_ai_openrouter`（待建） | `packages/aa_language_models/aa_ai_openrouter/` | 同上（额外 header、usage 字段） | 同上 |
+| `aa_ai_anthropic`（待建） | `packages/aa_language_models/aa_ai_anthropic/` | 另一套协议（Messages + 签名 thinking） | core + `reqwest` |
+| `aa_ai_gemini` / `aa_ai_ollama`（待建） | 同上 | 各自协议（generateContent / 原生 `/api/chat`） | 同上 |
 | `aa_language_models` | `packages/aa_language_models/` | provider 汇总入口 + 离线 `stub::StubClient` | 各 `aa_ai_*` + core |
 | `aa_agent` | `packages/aa_agent/` | agent loop + 工具执行接口 | core |
+
+### 2.0 协议 crate 与厂商 crate 的差别
+
+| | 协议 crate | 厂商 crate |
+|---|---|---|
+| 决定什么 | 请求 / 响应 / 流式事件的**形状** | 一家厂商在形状之上的**差异**（端点、鉴权、思考字段、`[DONE]` 语义、`finish_reason` 别名…） |
+| 复用 | 可被多个厂商 crate 依赖 | 只依赖 core（必要时依赖协议 crate 的 DTO） |
+| 命名 | `aa_ai_openai`（协议名） | `aa_ai_deepseek`（厂商名） |
+| 何时新开 | 出现第二套 wire 形状 | 某家差异多到要独立演进 |
+
+厂商 crate **可以**复用协议 crate 的响应 DTO，但**不共享 encoder**：请求编码各写一份，
+这是 [0008](../decisions/0008-provider-tiers.md) D1 明确接受的重复。
 
 依赖方向（箭头 = 依赖）：
 
 ```
 aa_ai_openai ──┐
-aa_ai_*    ──┼──> aa_language_model   （IR + trait）
+aa_ai_deepseek ──┼──> aa_language_model   （IR + trait）
+aa_ai_*    ──┘
 aa_language_models（汇总）─┘
 
 aa_agent ──> aa_language_model
@@ -129,6 +149,15 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
 
 ## 4. 加一家 provider 的步骤
 
+先判断是哪一层（[0008](../decisions/0008-provider-tiers.md) D1）：
+
+- **新协议**：照下面的步骤新建 crate。
+- **常见厂商、但协议相同**：也新建 `aa_ai_<vendor>` crate（用户决定，2026-11-17），
+  差异写在自己 crate 里；不往 `aa_language_model` 或别家 crate 里加分支。
+- **长尾端点**：不写 crate，留给运行时配置（尚未设计，见 0008「未做」）。
+
+步骤：
+
 1. `packages/aa_language_models/aa_ai_<name>/`（`cargo new --lib`），`Cargo.toml`
    写 `aa_language_model.workspace = true` + `reqwest` / `futures` / `serde` /
    `serde_json`，全部 `.workspace = true`。
@@ -141,12 +170,16 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
    `src/chat_completion/response/mod.rs`：响应 body / SSE chunk / 错误 body + 映射。
    参照 `aa_ai_openai`。将来接 Responses API 就是并列的 `src/responses/`，
    两套协议不共享结构体（请求侧只 `Serialize`、响应侧只 `Deserialize`）。
-3. `src/lib.rs`：只放 client 本体 +
+3. **厂商 crate 额外要写下的东西**（这些不允许上移到 core）：
+   端点与路径、鉴权 header、`response_format` 支持范围、思考字段名与回放顺序、
+   `[DONE]` / `finish_reason` 语义、流式 usage 的位置、额外的模型事实表。
+   对照 rig `Dialect`/`Quirks` 的字段表（[`docs/compare/provider-extension.md`](../compare/provider-extension.md) §8）。
+4. `src/lib.rs`：只放 client 本体 +
    `impl aa_language_model::provider::LanguageModelClient for <Name>LanguageModelProvider`。
-4. 根 `Cargo.toml`：`members` 和 `[workspace.dependencies]` 各加一行。
-5. `aa_language_models/src/lib.rs`：加一个
+5. 根 `Cargo.toml`：`members` 和 `[workspace.dependencies]` 各加一行。
+6. `aa_language_models/src/lib.rs`：加一个
    `pub mod <name> { pub use aa_ai_<name>::<Name>LanguageModelProvider; }`。
-6. core 不动。如果发现「必须改 core 才能接这家」，说明这家有 IR 表达不了的真需求，
+7. core 不动。如果发现「必须改 core 才能接这家」，说明这家有 IR 表达不了的真需求，
    先写 ADR，再决定改 IR 还是走 `ContentPart::Opaque`。
 
 ## 5. 哪些是用户决定，哪些是对比结论
@@ -156,7 +189,10 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
 | 内存占用优先于吞吐 | 用户规定（见 [0002](../decisions/0002-memory-first.md) 的背景） |
 | 命名 = 命名空间 + 短类型名 | 用户规定 |
 | 一家 provider 一个 crate，代码放 `aa_ai_*` | 用户规定；与 Zed 布局一致 |
+| provider 分三层：协议 / 常见厂商（一家一 crate）/ 长尾数据 | 用户规定（2026-11-17）；见 [0008](../decisions/0008-provider-tiers.md) |
 | 允许对 `packages/` 破坏性重构 | 用户规定 |
+| `Model` 只放模型事实，厂商差异放厂商 crate | 助手提案（0008 D2） |
+| `CompletionEvent::Reasoning` | 助手提案（0008 D3），对齐 Zed `Thinking` |
 | 语义 IR + per-provider wire + 统一事件流 | 对比结论（Zed / genai / rig 三者收敛） |
 | enum 表达封闭语义、`dyn` 表达开放实现 | 对比结论（Zed 的穷尽匹配优势） |
 | 借用式 encoder（不重建 owned 历史） | 对比结论 + 实测（`decisions/experiments/history-bytes`） |

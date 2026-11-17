@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 流式完成事件。agent loop 消费这个流来驱动「收文本 / 收工具调用 / 结束」。
+/// 流式完成事件。agent loop 消费这个流来驱动「收文本 / 收思考 / 收工具调用 / 结束」。
 ///
 /// 精简自 Zed `LanguageModelCompletionEvent`：去掉 `Queued`/`Started`/
 /// `StartMessage`/`RedactedThinking`/`ReasoningDetails`/`Compaction`/
@@ -13,6 +13,19 @@ use serde::{Deserialize, Serialize};
 pub enum CompletionEvent {
     /// 文本增量（LLM 流式输出）。
     Text(String),
+    /// 思考增量。
+    ///
+    /// 不是所有 provider 都发：OpenAI chat completions 本身没有思考，但
+    /// DeepSeek / OpenRouter / 多数 vLLM 部署在 `delta.reasoning_content` 里发，
+    /// Anthropic 是 `thinking_delta`，Ollama 的思考模型先吐 `<think>` 块。
+    /// provider 各自负责把自家字段翻成这个事件；不想暴露思考的可以丢掉。
+    ///
+    /// `signature` 只在 provider 要求回放签名时才有值（Anthropic），
+    /// 其余 provider 都是 `None`。文本和签名可能分属不同增量，由 provider 合并。
+    Reasoning {
+        text: String,
+        signature: Option<String>,
+    },
     /// LLM 决定调一个工具（agent loop 收到后去执行，结果回填成 `Message`）。
     /// `input` 是 LLM 给的 JSON 参数（可能不全，看 `is_complete`）。
     ToolUse {

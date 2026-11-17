@@ -80,6 +80,7 @@ docs/decisions/
 | [0005](0005-content-part-variants.md) | 加 `RedactedThinking`；原生压缩记录不进 `ContentPart`（走 Segment） | accepted（用户决定） | 2026-11-13 |
 | [0006](0006-wire-request-shape.md) | wire 请求体定型：带 `'a` 的强类型 DTO + 借用序列化；trait 改名 `LanguageModelClient` | proposed（用户方向） | 2026-11-13 |
 | [0007](0007-response-mapping.md) | 响应侧：真解析 SSE、`finish_reason` 决定 `StopReason`、`usage` 与错误体归位 | accepted（方向用户决定） | 2026-11-17 |
+| [0008](0008-provider-tiers.md) | provider 分三层：协议 / 常见厂商（一家一 crate）/ 长尾端点；`Model` 只放模型事实；事件流补 `Reasoning` | accepted（分层与一家一 crate 用户决定） | 2026-11-17 |
 
 ## 相关文档
 
@@ -87,6 +88,7 @@ docs/decisions/
 - `docs/zed/provider-mapping.md` —— Zed provider 架构 + 对 TanStack 映射的修正。
 - `docs/zed/acp-vs-llm-auth.md` —— `LanguageModelProvider: LanguageModelClient` 动机、四家分层对照、Zed Agent（内部 ACP）的认证写法，以及 ACP 认证与 LM 认证是两套独立类型的核实（调研记录，非 ADR）。
 - `docs/compare/content-part-ir.md` —— 四家 ContentPart IR 的逐字对照（含各变体的真实构造点）。
+- `docs/compare/provider-extension.md` —— 四家怎么接长尾端点、怎么给常见厂商区分度（`Dialect`/`Quirks` 字段表）。
 - `docs/design/strategy.md`、`docs/design/crate-layout.md`、`docs/design/tool-trait.md` —— 布局与命名规则、工具接口分层。
 
 ## 实验索引

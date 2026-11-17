@@ -73,6 +73,9 @@ impl<'a> AgentLoop<'a> {
 
             // 本轮模型说了什么。文本先攒着，工具调用按出现顺序记下。
             let mut round_text = String::new();
+            // 思考只回填进历史（有些 provider 下一轮要求带回去），不计入返回文本。
+            let mut round_reasoning = String::new();
+            let mut round_signature: Option<String> = None;
             let mut pending_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
 
             while let Some(event) = stream.next().await {
@@ -81,6 +84,12 @@ impl<'a> AgentLoop<'a> {
                         events.progress(&delta);
                         reply.push_str(&delta);
                         round_text.push_str(&delta);
+                    }
+                    provider::CompletionEvent::Reasoning { text, signature } => {
+                        round_reasoning.push_str(&text);
+                        if signature.is_some() {
+                            round_signature = signature;
+                        }
                     }
                     provider::CompletionEvent::ToolUse {
                         id, name, input, ..
@@ -97,9 +106,17 @@ impl<'a> AgentLoop<'a> {
             //
             // 漏掉这步是个真实 bug：下一轮模型看不到自己发过的 tool_call，会重发调用
             // 或答非所问。顺序也必须是 assistant（含 tool_call）→ tool（结果）。
+            // 思考排在最前：DeepSeek 要求 `reasoning_content` 按原顺序回放，
+            // Anthropic 要求签名思考块在文本之前。
             let had_calls = !pending_calls.is_empty();
             let mut assistant_parts: Vec<message::ContentPart> =
-                Vec::with_capacity(1 + pending_calls.len());
+                Vec::with_capacity(2 + pending_calls.len());
+            if !round_reasoning.is_empty() || round_signature.is_some() {
+                assistant_parts.push(message::ContentPart::Reasoning {
+                    text: Arc::from(round_reasoning.as_str()),
+                    signature: round_signature.as_deref().map(Arc::from),
+                });
+            }
             if !round_text.is_empty() {
                 assistant_parts.push(message::ContentPart::Text(Arc::from(round_text.as_str())));
             }
@@ -278,6 +295,56 @@ mod tests {
                 is_error: false,
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn reasoning_is_recorded_before_text_and_never_returned() {
+        // 第一轮：思考 + 调工具；第二轮：文本。看第二轮请求里的 assistant 消息。
+        let client = ScriptedClient::new([
+            vec![
+                provider::CompletionEvent::Reasoning {
+                    text: "thin".to_owned(),
+                    signature: None,
+                },
+                provider::CompletionEvent::Reasoning {
+                    text: "king".to_owned(),
+                    signature: Some("sig".to_owned()),
+                },
+                provider::CompletionEvent::ToolUse {
+                    id: "call_1".to_owned(),
+                    name: "echo".to_owned(),
+                    input: serde_json::json!({ "text": "hi" }),
+                    is_complete: true,
+                },
+                provider::CompletionEvent::Stop(provider::StopReason::ToolUse),
+            ],
+            vec![
+                provider::CompletionEvent::Text("done".to_owned()),
+                provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
+            ],
+        ]);
+
+        let registry = tool::AgentToolRegistry::new();
+        registry.register(Arc::new(Echo));
+
+        let agent = AgentLoop::new(&client, provider::Model::new("stub", "test"), registry);
+        let reply = agent.run("", "hi", &NoEvents).await.unwrap();
+        // 思考不进入返回文本。
+        assert_eq!(reply, "done");
+
+        let seen = client.seen.lock().unwrap();
+        let assistant = &seen[1].messages[1];
+        assert_eq!(assistant.role(), message::Role::Assistant);
+        // 思考在最前，且多段增量拼成一条、签名保留。
+        assert!(matches!(
+            &assistant.content()[0],
+            message::ContentPart::Reasoning { text, signature }
+                if &**text == "thinking" && signature.as_deref() == Some("sig")
+        ));
+        assert!(matches!(
+            assistant.content()[1],
+            message::ContentPart::ToolCall { .. }
         ));
     }
 

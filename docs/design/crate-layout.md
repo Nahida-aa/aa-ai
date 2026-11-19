@@ -154,7 +154,9 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
 - **新协议**：照下面的步骤新建 crate。
 - **常见厂商、但协议相同**：也新建 `aa_ai_<vendor>` crate（用户决定，2026-11-17），
   差异写在自己 crate 里；不往 `aa_language_model` 或别家 crate 里加分支。
-- **长尾端点**：不写 crate，留给运行时配置（尚未设计，见 0008「未做」）。
+- **长尾端点**：不写 crate，由调用方构造 provider 数据（应用层负责配置与凭证，
+  库只接收解好的 `base_url` / 鉴权 / header / 模型事实）。见
+  [`library-api.md`](library-api.md)。
 
 步骤：
 
@@ -191,6 +193,7 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
 | 一家 provider 一个 crate，代码放 `aa_ai_*` | 用户规定；与 Zed 布局一致 |
 | provider 分三层：协议 / 常见厂商（一家一 crate）/ 长尾数据 | 用户规定（2026-11-17）；见 [0008](../decisions/0008-provider-tiers.md) |
 | 允许对 `packages/` 破坏性重构 | 用户规定 |
+| 配置文件 / 凭证 / 模型表归应用层，库只接收已解好的数据 | 用户规定（2026-11-19）；见 [`library-api.md`](library-api.md) |
 | `Model` 只放模型事实，厂商差异放厂商 crate | 助手提案（0008 D2） |
 | `CompletionEvent::Reasoning` | 助手提案（0008 D3），对齐 Zed `Thinking` |
 | 语义 IR + per-provider wire + 统一事件流 | 对比结论（Zed / genai / rig 三者收敛） |

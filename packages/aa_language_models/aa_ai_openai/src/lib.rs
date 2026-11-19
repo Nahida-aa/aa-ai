@@ -17,8 +17,9 @@
 //!
 //! # 作为库：一个实例 = 一份端点配置
 //!
-//! 和 Zed 不同，这里没有全局 settings / 注册表 / 热重载（那是应用的职责）。库只提供
-//! **数据化的端点配置**，调用方按自己的配置文件构造实例：
+//! 和 Zed / opencode 不同，这里没有全局 settings / 注册表 / 热重载，也**不读环境变量
+//! 或配置文件**：配置、凭证来源、`id → provider` 表都是应用的职责。库只接收**已经
+//! 解好的**端点数据，调用方按自己的配置构造实例：
 //!
 //! ```no_run
 //! use aa_ai_openai::OpenAiLanguageModelProvider;
@@ -35,9 +36,9 @@
 //!     .with_auth_header("api-key", "secret");
 //! ```
 //!
-//! 这就是「长尾兼容端点」那一档（[ADR 0008]）：端点、鉴权、额外 header、模型表都是
-//! 数据，不需要写 crate。有硬差异的常见厂商（思考回放、`response_format` 范围、
-//! `[DONE]` 语义）仍各开 `aa_ai_<vendor>`。
+//! 这就是「长尾兼容端点」那一档（[ADR 0008]）：端点、鉴权、额外 header 都是构造数据，
+//! 不需要写 crate；模型表由应用持有（库只接收 `provider::Model`）。有硬差异的常见厂商
+//! （思考回放、`response_format` 范围、`[DONE]` 语义）仍各开 `aa_ai_<vendor>`。
 //!
 //! [ADR 0008]: ../../../docs/decisions/0008-provider-tiers.md
 //!

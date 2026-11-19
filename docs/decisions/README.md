@@ -90,6 +90,7 @@ docs/decisions/
 - `docs/compare/content-part-ir.md` —— 四家 ContentPart IR 的逐字对照（含各变体的真实构造点）。
 - `docs/compare/provider-extension.md` —— 四家怎么接长尾端点、怎么给常见厂商区分度（`Dialect`/`Quirks` 字段表）。
 - `docs/design/strategy.md`、`docs/design/crate-layout.md`、`docs/design/tool-trait.md` —— 布局与命名规则、工具接口分层。
+- `docs/design/library-api.md` —— 库与应用的边界：配置/凭证/模型表归应用，库只接收数据（对照 TanStack AI / Zed / opencode）。
 
 ## 实验索引
 

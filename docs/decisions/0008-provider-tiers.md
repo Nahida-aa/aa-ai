@@ -159,8 +159,8 @@ pub enum CompletionEvent {
 
 ## 未做
 
-- 长尾层的声明式类型（可序列化的 `ProviderConfig { base_url, auth, headers, models }`）
-  尚未设计；现在用 provider 的构造数据承担（见附录）。
+- 长尾层的**声明式类型**不做进库：配置格式、密钥来源、`id → provider` 表归应用
+  （2026-11-19 用户纠正，见 [`docs/design/library-api.md`](../design/library-api.md)）。
 - `aa_ai_openai` 的 encoder 尚未按 `Model::supports_tools` / `uses_developer_role` /
   `supports_images` 筛字段。
 - `verbosity` / `prompt_cache_retention` / `reasoning_details` 仍按 0007「未做」处理。
@@ -172,7 +172,7 @@ pub enum CompletionEvent {
 `aa_ai_openai::OpenAiLanguageModelProvider` 的构造数据承担，没有新增类型：
 
 ```rust
-OpenAiLanguageModelProvider::new("sk-...")        // Authorization: Bearer
+OpenAiLanguageModelProvider::new(api_key)         // Authorization: Bearer
     .with_base_url("https://api.example.com/v1")  // 去掉尾斜杠
     .with_header("HTTP-Referer", "...")           // 追加 header，同名覆盖默认
     .with_header("X-Title", "...");
@@ -184,6 +184,7 @@ OpenAiLanguageModelProvider::without_auth()        // 非 Bearer 鉴权（Azure 
     .with_auth_header("api-key", "secret");
 ```
 
+- `api_key` 是**构造参数**，库不读环境变量：应用决定每个 provider 的密钥来源后传进来；
 - header 在进入 future 之前同步构造，非法名字/值返回 `LlmError::Transport`，不 panic；
 - `new("")` 会发空的 `Bearer `，所以「无鉴权」必须用 `without_auth()`（写进文档）；
 - **兼容端点的思考**：响应 DTO 同时认 `reasoning_content` / `reasoning` /
@@ -191,10 +192,10 @@ OpenAiLanguageModelProvider::without_auth()        // 非 Bearer 鉴权（Azure 
   `ai-openai/src/compatible/adapter.ts:52`）。这三个字段出现在 OpenAI 形状的同一位置，
   属于兼容端点的扩展，不改变 `aa_ai_openai` 的请求形状；
 - **回放仍不在这一层**：把思考写回下一轮 assistant 消息（DeepSeek 要求）留给厂商 crate；
-- `examples/chat.rs` 是验收入口：只靠 `AA_BASE_URL` / `AA_API_KEY` / `AA_MODEL` /
-  `AA_EXTRA_HEADER_n` 就能逐个试通手里的第三方兼容 API；
-- `list_models()`（`GET {base_url}/models`）返回端点声明的 `id`，`examples/models.rs`
-  直接打印，用来填 `AA_MODEL`。非 2xx 复用 `error_message` 抽 `error.message`，
-  例如 401 会显示端点要求的鉴权方式（`x-api-key` 或 Bearer）。
+- `list_models()`（`GET {base_url}/models`）返回端点声明的 `id`，非 2xx 复用
+  `error_message` 抽 `error.message`，例如 401 会显示端点要求的鉴权方式
+  （`x-api-key` 或 Bearer）。它只发请求、不读本地配置，属于 wire 能力。
+- 库内**不再有** `AA_API_KEY` 之类的环境变量约定或配置文件解析；多提供商的冒烟测试
+  与配置归应用层。见 [`docs/design/library-api.md`](../design/library-api.md)。
 
-「模型表」仍是调用方自己构造 `provider::Model`（可逐字段赋值），尚未提供声明式列表类型。
+「模型表」仍是应用自己构造 `provider::Model`（可逐字段赋值），库不提供声明式列表类型。

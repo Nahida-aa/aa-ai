@@ -87,6 +87,7 @@ docs/decisions/
 - `docs/zed/language_models.md` —— Zed / genai / rig 的源码核对与多提供商实现建议（本目录决策的主要证据来源）。
 - `docs/zed/provider-mapping.md` —— Zed provider 架构 + 对 TanStack 映射的修正。
 - `docs/zed/acp-vs-llm-auth.md` —— `LanguageModelProvider: LanguageModelClient` 动机、四家分层对照、Zed Agent（内部 ACP）的认证写法，以及 ACP 认证与 LM 认证是两套独立类型的核实（调研记录，非 ADR）。
+- `docs/compare/README.md` —— 库层对比的收录规则：哪些事实归这里、哪些归应用仓库 `aacode`。
 - `docs/compare/content-part-ir.md` —— 四家 ContentPart IR 的逐字对照（含各变体的真实构造点）。
 - `docs/compare/provider-extension.md` —— 四家怎么接长尾端点、怎么给常见厂商区分度（`Dialect`/`Quirks` 字段表）。
 - `docs/design/strategy.md`、`docs/design/crate-layout.md`、`docs/design/tool-trait.md` —— 布局与命名规则、工具接口分层。

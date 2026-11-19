@@ -6,6 +6,7 @@ edition = "2024"
 # 一家 provider 一个 crate：只有这里依赖网络库和厂商 JSON 字段。
 [dependencies]
 aa_language_model.workspace = true
+base64.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true

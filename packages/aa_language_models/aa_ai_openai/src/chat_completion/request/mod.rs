@@ -144,7 +144,14 @@ pub struct ChatJsonSchema<'a> {
 /// - `ToolCall` → `assistant.tool_calls[]`（`id`/`name` 借用，`arguments` 分配 JSON 字符串）；
 /// - `ToolResult` → 独立的 `role: "tool"` 消息（一条结果一条消息），**即使它在
 ///   canonical IR 里位于 user 轮**——这正是 encoder 该做的事，IR 不为此变形；
-/// - `Image` / `Opaque` → v0 不进 wire。
+/// - `Image` → 多模态 `content` 数组里的 `image_url`；模型不支持图片就报错，
+///   **不静默丢弃**（丢图会让模型答得莫名其妙，比报错难查得多）；
+/// - `Opaque` → 跳过（provider 私有负载没有通用 wire 槽位）。
+///
+/// **能力位在这里生效**（`Model`，见 ADR 0006 D4）：
+/// - `uses_developer_role` → `System` 发成 `role: "developer"`；
+/// - `supports_tools = false` + 请求带工具 → [`LlmError::Unsupported`]；
+/// - `supports_images = false` + 请求带图片 → [`LlmError::Unsupported`]。
 ///
 /// 约定：**工具结果独占一条 user 消息**，不和用户文本混排。Zed 的
 /// `AgentMessage::to_request()` 也是把一条 agent 消息拆成「assistant（文本/思考/
@@ -154,6 +161,16 @@ pub fn to_chat_completion_request<'a>(
     request: &'a aa_language_model::request::Request,
     model: &'a aa_language_model::provider::Model,
 ) -> Result<ChatCompletionRequest<'a>, aa_language_model::provider::LlmError> {
+    // 能力位先校验：不支持的东西发出去只会让端点 400，错误还看不清原因。
+    if !model.supports_tools && !request.tools.is_empty() {
+        return Err(aa_language_model::provider::LlmError::Unsupported(format!(
+            "模型 `{}` 标记为不支持工具（Model::supports_tools = false），\
+             但请求带了 {} 个工具",
+            model.id,
+            request.tools.len()
+        )));
+    }
+
     let mut messages = Vec::with_capacity(request.messages.len());
 
     for msg in &request.messages {
@@ -168,25 +185,23 @@ pub fn to_chat_completion_request<'a>(
                 messages.push(
                     crate::chat_completion::request::message::ChatMessage::Tool {
                         tool_call_id: Cow::Borrowed(call_id),
-                        content: tool_result_text(content),
+                        content: tool_result_content(content, model)?,
                     },
                 );
             }
         }
 
-        // 文本：单 part 借用，多 part 才分配拼接。
-        let mut text: Option<Cow<'a, str>> = None;
+        // 其余内容按**原始顺序**攒成 parts：多模态数组的顺序会影响模型理解。
+        let mut parts: Vec<crate::chat_completion::request::message::ChatContentPart<'a>> =
+            Vec::new();
         let mut calls: Vec<crate::chat_completion::request::message::ChatToolCall<'a>> = Vec::new();
         for part in msg.content() {
             match part {
                 aa_language_model::request::message::ContentPart::Text(t) => {
-                    text = Some(match text.take() {
-                        None => Cow::Borrowed(t.as_ref()),
-                        Some(mut acc) => {
-                            acc.to_mut().push_str(t);
-                            acc
-                        }
-                    });
+                    push_text(&mut parts, t);
+                }
+                aa_language_model::request::message::ContentPart::Image(image) => {
+                    parts.push(image_part(image, model)?);
                 }
                 aa_language_model::request::message::ContentPart::ToolCall { id, name, input } => {
                     calls.push(crate::chat_completion::request::message::ChatToolCall {
@@ -202,32 +217,36 @@ pub fn to_chat_completion_request<'a>(
                 aa_language_model::request::message::ContentPart::Reasoning { .. } => {}
                 // OpenAI chat completions 没有加密思考块的概念：跳过（与 Zed 一致）。
                 aa_language_model::request::message::ContentPart::RedactedThinking(_) => {}
-                aa_language_model::request::message::ContentPart::Image(_)
-                | aa_language_model::request::message::ContentPart::Opaque(_) => {}
+                // provider 私有负载没有通用槽位；它的产生者才懂怎么回放。
+                aa_language_model::request::message::ContentPart::Opaque(_) => {}
                 // 已在上面展开成独立的 role:"tool" 消息。
                 aa_language_model::request::message::ContentPart::ToolResult { .. } => {}
             }
         }
 
         // 纯工具结果消息已经全部展开成 `role:"tool"`，不该再补一条空 user/assistant。
-        if text.is_none() && calls.is_empty() {
+        let content =
+            crate::chat_completion::request::message::ChatMessageContent::from_parts(parts);
+        if content.is_none() && calls.is_empty() {
             continue;
         }
 
+        let content = content.unwrap_or(
+            crate::chat_completion::request::message::ChatMessageContent::Plain(Cow::Borrowed("")),
+        );
         messages.push(match msg.role() {
+            aa_language_model::request::message::Role::System if model.uses_developer_role => {
+                crate::chat_completion::request::message::ChatMessage::Developer { content }
+            }
             aa_language_model::request::message::Role::System => {
-                crate::chat_completion::request::message::ChatMessage::System {
-                    content: text.unwrap_or(Cow::Borrowed("")),
-                }
+                crate::chat_completion::request::message::ChatMessage::System { content }
             }
             aa_language_model::request::message::Role::User => {
-                crate::chat_completion::request::message::ChatMessage::User {
-                    content: text.unwrap_or(Cow::Borrowed("")),
-                }
+                crate::chat_completion::request::message::ChatMessage::User { content }
             }
             aa_language_model::request::message::Role::Assistant => {
                 crate::chat_completion::request::message::ChatMessage::Assistant {
-                    content: text,
+                    content: Some(content),
                     tool_calls: calls,
                 }
             }
@@ -274,7 +293,10 @@ pub fn to_chat_completion_request<'a>(
             include_usage: true,
         }),
         stop: (!request.stop.is_empty()).then_some(request.stop.as_slice()),
-        tool_choice: request.tool_choice.as_ref().map(to_wire_tool_choice),
+        // 没有工具时 `tool_choice` 无意义，有些端点还会因此 400。
+        tool_choice: (!request.tools.is_empty())
+            .then(|| request.tool_choice.as_ref().map(to_wire_tool_choice))
+            .flatten(),
         parallel_tool_calls: (model.supports_parallel_tool_calls && !request.tools.is_empty())
             .then_some(true),
         response_format: request
@@ -342,22 +364,99 @@ fn to_wire_response_format(
     }
 }
 
-/// OpenAI 的 tool 消息只收文本；图片结果 v0 丢弃（改用多模态 content 数组时再补）。
-/// 单段文本直接借用，多段才拼接。
-fn tool_result_text<'a>(
+/// 工具结果的一段内容：文本借用，图片转 data URL。
+///
+/// OpenAI 的 `role:"tool"` 消息也接受 `content` 数组（Zed 同样发多段），
+/// 所以图片结果不用丢。
+fn tool_result_content<'a>(
     content: &'a [aa_language_model::request::message::ToolResultPart],
-) -> Cow<'a, str> {
-    let mut out: Option<Cow<'a, str>> = None;
+    model: &aa_language_model::provider::Model,
+) -> Result<
+    crate::chat_completion::request::message::ChatMessageContent<'a>,
+    aa_language_model::provider::LlmError,
+> {
+    use crate::chat_completion::request::message::ChatMessageContent;
+
+    let mut parts = Vec::with_capacity(content.len());
     for part in content {
-        if let Some(text) = part.as_text() {
-            out = Some(match out.take() {
-                None => Cow::Borrowed(text),
-                Some(mut acc) => {
-                    acc.to_mut().push_str(text);
-                    acc
-                }
-            });
+        match part {
+            aa_language_model::request::message::ToolResultPart::Text(text) => {
+                push_text(&mut parts, text);
+            }
+            aa_language_model::request::message::ToolResultPart::Image(image) => {
+                parts.push(image_part(image, model)?);
+            }
         }
     }
-    out.unwrap_or(Cow::Borrowed(""))
+
+    // 工具消息的 `content` 是必填字段，没有内容时给空串。
+    Ok(ChatMessageContent::from_parts(parts)
+        .unwrap_or(ChatMessageContent::Plain(Cow::Borrowed(""))))
+}
+
+/// 追加一段文本：相邻文本合并成一个 part，这样「多段文本」不会变成多模态数组
+/// （数组形状很多兼容端点不认）。
+fn push_text<'a>(
+    parts: &mut Vec<crate::chat_completion::request::message::ChatContentPart<'a>>,
+    text: &'a str,
+) {
+    use crate::chat_completion::request::message::ChatContentPart;
+
+    if let Some(ChatContentPart::Text { text: prev }) = parts.last_mut() {
+        match prev {
+            Cow::Owned(owned) => owned.push_str(text),
+            Cow::Borrowed(existing) => {
+                let existing: &'a str = existing;
+                let mut owned = String::with_capacity(existing.len() + text.len());
+                owned.push_str(existing);
+                owned.push_str(text);
+                *prev = Cow::Owned(owned);
+            }
+        }
+        return;
+    }
+
+    parts.push(ChatContentPart::Text {
+        text: Cow::Borrowed(text),
+    });
+}
+
+/// 一张图片 → `image_url` part。模型不支持图片时明确报错。
+fn image_part<'a>(
+    image: &'a aa_language_model::request::message::Image,
+    model: &aa_language_model::provider::Model,
+) -> Result<
+    crate::chat_completion::request::message::ChatContentPart<'a>,
+    aa_language_model::provider::LlmError,
+> {
+    if !model.supports_images {
+        return Err(aa_language_model::provider::LlmError::Unsupported(format!(
+            "模型 `{}` 标记为不支持图片输入（Model::supports_images = false）",
+            model.id
+        )));
+    }
+
+    Ok(
+        crate::chat_completion::request::message::ChatContentPart::ImageUrl {
+            image_url: crate::chat_completion::request::message::ChatImageUrl {
+                url: image_url(image),
+            },
+        },
+    )
+}
+
+/// 图片 → OpenAI 的 `url` 字段：http(s) 直接借，字节/裸 base64 转成 data URL。
+fn image_url(image: &aa_language_model::request::message::Image) -> Cow<'_, str> {
+    use aa_language_model::request::message::ImageSource;
+    use base64::Engine as _;
+
+    match &image.source {
+        ImageSource::Url(url) => Cow::Borrowed(url),
+        ImageSource::Base64(data) => Cow::Owned(format!("data:{};base64,{}", image.mime, data)),
+        ImageSource::Bytes(bytes) => Cow::Owned(format!(
+            "data:{};base64,{}",
+            image.mime,
+            base64::engine::general_purpose::STANDARD.encode(bytes.as_ref())
+        )),
+    }
 }

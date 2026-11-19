@@ -253,3 +253,26 @@ Zed 的 trait 叫 `LanguageModelClient`（`crates/language_model/src/language_mo
   的分配次数与峰值 RSS（承接 0002 附录第 144 行、0002:137 的阈值）。
 - [ ] 200k token 级历史的请求期峰值，确认没有第二份历史。
 - [x] `LanguageModelClient` 新签名已落地：返回 `'static` future，同步编码在方法体内完成。
+
+## 附录：能力位在 encoder 里生效（2026-11-19）
+
+D4 把「静态能力位」放进 `provider::Model`，当时只落地了三个（`uses_max_completion_tokens`
+/ `supports_parallel_tool_calls` / `supports_prompt_cache_key`）。另外三个位现在也接上了，
+并且**不再是静默行为**：
+
+| `Model` 能力位 | encoder 行为 |
+|---|---|
+| `uses_developer_role` | `Role::System` 发成 `role: "developer"`（o 系列 / GPT-5） |
+| `supports_tools = false` + 请求带 tools | `LlmError::Unsupported`，不发请求 |
+| `supports_images = false` + 请求带图片 | `LlmError::Unsupported`，不发请求 |
+| `supports_images = true` | 图片进多模态 `content` 数组：`image_url.url` 是 http(s) 或 data URL（`Bytes` 按 `mime` 转 base64） |
+
+两个刻意选择：
+
+- **不支持就报错，不静默丢弃。** 丢图/丢工具会让模型答得莫名其妙，错误现场离原因很远；
+  端点返回的 400 也不解释「是哪个 part 不被接受」。
+- **纯文本仍发字符串形状。** 只有需要图片时才用 `content: [...]` 数组 —— 不少兼容端点
+  见到数组就 400。相邻文本 part 在编码时合并，多段文本不会意外变成数组。
+
+工具结果里的图片走同一套（OpenAI 的 `role:"tool"` 消息也接受 `content` 数组，与 Zed 一致）。
+`ContentPart::Opaque` 仍然跳过：provider 私有负载没有通用槽位。

@@ -501,6 +501,211 @@ mod tests {
         ));
     }
 
+    // ---------- 能力位 ----------
+
+    /// 一条 user 消息 → 编码后的 wire body。
+    fn encode_user(
+        parts: Vec<aa_language_model::request::message::ContentPart>,
+        model: &aa_language_model::provider::Model,
+    ) -> serde_json::Value {
+        let req = aa_language_model::request::Request {
+            messages: vec![Arc::new(aa_language_model::request::message::Message::new(
+                aa_language_model::request::message::Role::User,
+                parts,
+            ))],
+            ..Default::default()
+        };
+        let body =
+            crate::chat_completion::request::to_chat_completion_request(&req, model).unwrap();
+        serde_json::to_value(&body).unwrap()
+    }
+
+    #[test]
+    fn uses_developer_role_when_the_model_asks_for_it() {
+        let req = aa_language_model::request::Request {
+            messages: vec![Arc::new(aa_language_model::request::message::Message::new(
+                aa_language_model::request::message::Role::System,
+                vec![aa_language_model::request::message::ContentPart::text(
+                    "be terse",
+                )],
+            ))],
+            ..Default::default()
+        };
+
+        let mut model = make_model("gpt-test");
+        let body =
+            crate::chat_completion::request::to_chat_completion_request(&req, &model).unwrap();
+        assert_eq!(
+            serde_json::to_value(&body).unwrap()["messages"][0]["role"],
+            "system"
+        );
+
+        // o 系列 / GPT-5：同一个 System 语义，wire 上叫 developer。
+        model.uses_developer_role = true;
+        let body =
+            crate::chat_completion::request::to_chat_completion_request(&req, &model).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["messages"][0]["role"], "developer");
+        assert_eq!(json["messages"][0]["content"], "be terse");
+    }
+
+    #[test]
+    fn tools_are_rejected_when_the_model_does_not_support_them() {
+        let req = aa_language_model::request::Request {
+            tools: vec![Arc::new(
+                aa_language_model::request::tools::Tool::new_function(
+                    "read".to_owned(),
+                    String::new(),
+                    serde_json::json!({ "type": "object" }),
+                    false,
+                ),
+            )],
+            ..Default::default()
+        };
+
+        let mut model = make_model("no-tools");
+        model.supports_tools = false;
+        let err =
+            crate::chat_completion::request::to_chat_completion_request(&req, &model).unwrap_err();
+        match err {
+            aa_language_model::provider::LlmError::Unsupported(msg) => {
+                assert!(msg.contains("supports_tools"), "{msg}");
+                assert!(msg.contains("no-tools"), "{msg}");
+            }
+            other => panic!("期望 Unsupported，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn images_are_rejected_when_the_model_does_not_support_them() {
+        let image = aa_language_model::request::message::Image {
+            mime: Arc::from("image/png"),
+            source: aa_language_model::request::message::ImageSource::Url(Arc::from(
+                "https://example.com/a.png",
+            )),
+        };
+
+        let err = crate::chat_completion::request::to_chat_completion_request(
+            &aa_language_model::request::Request {
+                messages: vec![Arc::new(aa_language_model::request::message::Message::new(
+                    aa_language_model::request::message::Role::User,
+                    vec![aa_language_model::request::message::ContentPart::Image(
+                        Arc::new(image),
+                    )],
+                ))],
+                ..Default::default()
+            },
+            &make_model("text-only"),
+        )
+        .unwrap_err();
+        match err {
+            aa_language_model::provider::LlmError::Unsupported(msg) => {
+                assert!(msg.contains("supports_images"), "{msg}");
+            }
+            other => panic!("期望 Unsupported，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_and_image_become_multipart_in_original_order() {
+        let image = aa_language_model::request::message::Image {
+            mime: Arc::from("image/png"),
+            source: aa_language_model::request::message::ImageSource::Url(Arc::from(
+                "https://example.com/a.png",
+            )),
+        };
+        let mut model = make_model("vision");
+        model.supports_images = true;
+
+        let json = encode_user(
+            vec![
+                aa_language_model::request::message::ContentPart::text("这是什么"),
+                aa_language_model::request::message::ContentPart::Image(Arc::new(image)),
+            ],
+            &model,
+        );
+        let content = &json["messages"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "这是什么");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "https://example.com/a.png");
+    }
+
+    #[test]
+    fn image_only_message_keeps_an_array_content() {
+        let image = aa_language_model::request::message::Image {
+            mime: Arc::from("image/png"),
+            source: aa_language_model::request::message::ImageSource::Bytes(Arc::from(
+                &b"hello"[..],
+            )),
+        };
+        let mut model = make_model("vision");
+        model.supports_images = true;
+
+        let json = encode_user(
+            vec![aa_language_model::request::message::ContentPart::Image(
+                Arc::new(image),
+            )],
+            &model,
+        );
+        let content = &json["messages"][0]["content"];
+        // 单张图片也必须用数组（字符串形状装不下）。
+        assert_eq!(content[0]["type"], "image_url");
+        // 字节转 data URL：hello 的 base64 是 aGVsbG8=。
+        assert_eq!(
+            content[0]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn raw_base64_image_is_wrapped_in_a_data_url() {
+        let image = aa_language_model::request::message::Image {
+            mime: Arc::from("image/jpeg"),
+            source: aa_language_model::request::message::ImageSource::Base64(Arc::from("AAAA")),
+        };
+        let mut model = make_model("vision");
+        model.supports_images = true;
+
+        let json = encode_user(
+            vec![aa_language_model::request::message::ContentPart::Image(
+                Arc::new(image),
+            )],
+            &model,
+        );
+        assert_eq!(
+            json["messages"][0]["content"][0]["image_url"]["url"],
+            "data:image/jpeg;base64,AAAA"
+        );
+    }
+
+    #[test]
+    fn multi_text_message_stays_a_plain_string() {
+        let model = make_model("gpt-test");
+        let json = encode_user(
+            vec![
+                aa_language_model::request::message::ContentPart::text("he"),
+                aa_language_model::request::message::ContentPart::text("llo"),
+            ],
+            &model,
+        );
+        // 相邻文本合并，不变成多模态数组（兼容端点只认字符串）。
+        assert_eq!(json["messages"][0]["content"], "hello");
+    }
+
+    #[test]
+    fn tool_choice_is_omitted_without_tools() {
+        let req = aa_language_model::request::Request {
+            tool_choice: Some(aa_language_model::request::ToolChoice::Required),
+            ..Default::default()
+        };
+        let model = make_model("m");
+        let body =
+            crate::chat_completion::request::to_chat_completion_request(&req, &model).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("tool_choice").is_none(), "{json}");
+    }
+
     // ---------- 响应侧 ----------
 
     fn parse(json: serde_json::Value) -> crate::chat_completion::response::ChatCompletionResponse {

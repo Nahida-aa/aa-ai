@@ -15,10 +15,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aa_ai_anthropic"
+version = "0.1.0"
+
+[[package]]
+name = "aa_ai_gemini"
+version = "0.1.0"
+
+[[package]]
+name = "aa_ai_ollama"
+version = "0.1.0"
+
+[[package]]
 name = "aa_ai_openai"
 version = "0.1.0"
 dependencies = [
  "aa_language_model",
+ "base64 0.22.1",
  "futures",
  "reqwest",
  "serde",

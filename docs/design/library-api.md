@@ -76,6 +76,31 @@ let agnes = aa_language_models::openai::OpenAiLanguageModelProvider::new(app_con
 
 应用想用文件也没问题，但解析发生在应用里；库看到的只是一个已构造的 provider。
 
+### 4.1 与 Zed 同名，但不是同一个东西
+
+`OpenAiLanguageModelProvider` 这个名字借自 Zed，但职责只有「端点数据 + 发一次请求」：
+
+| 职责 | Zed `OpenAiLanguageModelProvider` | aa-ai `OpenAiLanguageModelProvider` |
+|---|---|---|
+| 端点 / 鉴权 / 额外 header | ✅ | ✅（构造数据） |
+| `stream_completion`（一次 LLM 调用） | ✅ | ✅ |
+| provider 注册 / `id` / `name` / `icon` | ✅ `LanguageModelProvider` | ❌ 应用层 |
+| 模型目录 / 默认模型 | ✅ `provided_models` / `default_model` | ❌ 应用层传 `Model` |
+| 认证 UI / `set_api_key` / 钥匙串 | ✅ | ❌ 应用层 |
+| 限流 | ✅ `ModelRateLimiters` | ❌ 未做 |
+| GPUI `App` / `AsyncApp` | ✅ | ❌ 纯 async |
+
+Zed 的 wire 逻辑在 `crates/open_ai/src/open_ai.rs:1161` 的
+`stream_completion(client, provider_name, api_url, api_key, request, extra_headers)`；
+我们的类型 ≈ 这些参数的数据 + 该函数。Zed 的 `LanguageModelProvider: LanguageModelClient`
+（`crates/language_model/src/language_model.rs:582`）把「目录 / 认证 / UI」也绑在
+provider 上，我们的 core 没有这个 trait，那部分在 `aacode` 的设置层。
+
+其他项目的同层对象也不是同一种切法：rig 是 `openai::OpenAI` 客户端 +
+`Model<W, T>`（wire + transport）；genai 是单个 `Client` + `ModelIden`；TanStack 是
+实现 `TextAdapter` 的 adapter 实例；opencode 和 Zed 一样，把 provider 注册 / 凭证 /
+模型目录做成应用级服务（`Provider.Service` + 每家一个 provider 包）。
+
 ## 5. 为什么不在库里做配置
 
 - **多实例**：同一进程要同时连多个提供商，全局 env / 单例会互相覆盖；

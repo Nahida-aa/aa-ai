@@ -12,3 +12,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# 超时测试要起 tokio runtime（reqwest 的 timer/IO 依赖它）。
+tokio.workspace = true
+

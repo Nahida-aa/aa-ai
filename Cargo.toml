@@ -22,7 +22,7 @@ aa_ai_openai = { path = "packages/aa_language_models/aa_ai_openai" }
 futures = "0.3"
 # 用系统信任库（rustls-native-certs）而不是内置 webpki-roots：企业/本地代理
 # （mitmproxy 等）的 CA 通常装在系统库里，curl/git 能用而 webpki-roots 不认。
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls-native-roots", "stream"] }
 schemars = "0.8"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

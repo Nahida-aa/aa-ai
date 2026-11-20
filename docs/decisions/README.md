@@ -81,6 +81,7 @@ docs/decisions/
 | [0006](0006-wire-request-shape.md) | wire 请求体定型：带 `'a` 的强类型 DTO + 借用序列化；trait 改名 `LanguageModelClient` | proposed（用户方向） | 2026-11-13 |
 | [0007](0007-response-mapping.md) | 响应侧：真解析 SSE、`finish_reason` 决定 `StopReason`、`usage` 与错误体归位 | accepted（方向用户决定） | 2026-11-17 |
 | [0008](0008-provider-tiers.md) | provider 分三层：协议 / 常见厂商（一家一 crate）/ 长尾端点；`Model` 只放模型事实；事件流补 `Reasoning` | accepted（分层与一家一 crate 用户决定） | 2026-11-17 |
+| [0009](0009-http-transport.md) | HTTP 传输：代理语义对齐 Zed；客户端级 per-read idle 超时（默认 120s）+ keep-alive 取值照 Zed | proposed（代理语义用户决定；超时值助手提案，已落地） | 2026-11-20 |
 
 ## 相关文档
 
@@ -90,6 +91,7 @@ docs/decisions/
 - `docs/compare/README.md` —— 库层对比的收录规则：哪些事实归这里、哪些归应用仓库 `aacode`。
 - `docs/compare/content-part-ir.md` —— 四家 ContentPart IR 的逐字对照（含各变体的真实构造点）。
 - `docs/compare/provider-extension.md` —— 四家怎么接长尾端点、怎么给常见厂商区分度（`Dialect`/`Quirks` 字段表）。
+- `docs/compare/http-client.md` —— 四家的 HTTP 客户端：代理、`NO_PROXY`、连接/读取超时、流式 idle 超时的实现位置。
 - `docs/design/strategy.md`、`docs/design/crate-layout.md`、`docs/design/tool-trait.md` —— 布局与命名规则、工具接口分层。
 - `docs/design/library-api.md` —— 库与应用的边界：配置/凭证/模型表归应用，库只接收数据（对照 TanStack AI / Zed / opencode）。
 

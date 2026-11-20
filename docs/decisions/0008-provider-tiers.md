@@ -164,7 +164,8 @@ pub enum CompletionEvent {
 - `aa_ai_openai` 的 encoder 尚未按 `Model::supports_tools` / `uses_developer_role` /
   `supports_images` 筛字段。
 - `verbosity` / `prompt_cache_retention` / `reasoning_details` 仍按 0007「未做」处理。
-- `aa_ai_ollama` 是否保留原生 `/api/chat` crate，还是并入长尾数据层，待接第二家时定。
+- `aa_ai_ollama` 原生 `/api/chat` 已确定保留成独立 crate（2026-11-21，见
+  [0011](0011-ollama-native.md)）：它是第二个协议，不具备长尾数据层的形状。
 
 ## 附录：长尾层的第一版实现（2026-11-17）
 

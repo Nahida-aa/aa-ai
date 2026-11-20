@@ -25,6 +25,16 @@ version = "0.1.0"
 [[package]]
 name = "aa_ai_ollama"
 version = "0.1.0"
+dependencies = [
+ "aa_http_client",
+ "aa_language_model",
+ "base64 0.22.1",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "aa_ai_openai"
@@ -62,6 +72,7 @@ dependencies = [
 name = "aa_language_models"
 version = "0.1.0"
 dependencies = [
+ "aa_ai_ollama",
  "aa_ai_openai",
  "aa_language_model",
  "futures",

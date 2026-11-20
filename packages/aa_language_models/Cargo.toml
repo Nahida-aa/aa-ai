@@ -5,6 +5,7 @@ edition = "2024"
 
 # 汇总入口：转发各 provider crate + 离线 stub。不含 IR，也不含 wire 适配。
 [dependencies]
+aa_ai_ollama.workspace = true
 aa_ai_openai.workspace = true
 aa_language_model.workspace = true
 futures.workspace = true

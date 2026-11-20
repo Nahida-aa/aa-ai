@@ -25,11 +25,12 @@
 |---|---|---|---|
 | `aa_language_model` | `packages/aa_language_model/` | canonical IR（`request::*`）+ `provider::LanguageModelClient` trait / 错误 / 事件 / `Model` | 无网络依赖 |
 | `aa_http_client` | `aa-stack/packages/util/aa_http_client/`（**库外**） | 共享 HTTP 传输：一个进程一个连接池；代理 / 超时 / keep-alive / 错误文案 | `reqwest`（不认识 LLM 类型） |
-| `aa_ai_openai` | `packages/aa_language_models/aa_ai_openai/` | OpenAI Chat Completions 的 wire DTO + encoder + 发请求 | core + `aa_http_client` |
+| `aa_ai_openai` | `packages/aa_language_models/aa_ai_openai/` | OpenAI Chat Completions（`/chat/completions`，SSE）的 wire DTO + encoder + 发请求 | core + `aa_http_client` |
+| `aa_ai_ollama` | `packages/aa_language_models/aa_ai_ollama/` | Ollama 原生（`/api/chat`，NDJSON）：`thinking`、对象形态的 `arguments`、`tool_name` 关联 | core + `aa_http_client` |
 | `aa_ai_deepseek`（待建） | `packages/aa_language_models/aa_ai_deepseek/` | 常见厂商：自有 encoder，差异写在自己 crate 里 | core + `aa_http_client`（可按需复用 `aa_ai_openai` 的 DTO） |
 | `aa_ai_openrouter`（待建） | `packages/aa_language_models/aa_ai_openrouter/` | 同上（额外 header、usage 字段） | 同上 |
 | `aa_ai_anthropic`（待建） | `packages/aa_language_models/aa_ai_anthropic/` | 另一套协议（Messages + 签名 thinking） | core + `aa_http_client` |
-| `aa_ai_gemini` / `aa_ai_ollama`（待建） | 同上 | 各自协议（generateContent / 原生 `/api/chat`） | 同上 |
+| `aa_ai_gemini`（待建） | 同上 | `generateContent` | 同上 |
 | `aa_language_models` | `packages/aa_language_models/` | provider 汇总入口 + 离线 `stub::StubClient` | 各 `aa_ai_*` + core |
 | `aa_agent` | `packages/aa_agent/` | agent loop + 工具执行接口 | core |
 

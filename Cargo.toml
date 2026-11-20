@@ -18,6 +18,7 @@ members = [
 aa_language_model = { path = "packages/aa_language_model" }
 aa_language_models = { path = "packages/aa_language_models" }
 aa_ai_openai = { path = "packages/aa_language_models/aa_ai_openai" }
+aa_ai_ollama = { path = "packages/aa_language_models/aa_ai_ollama" }
 # 共享传输在 aa-stack（不是 aa-ai）：它不认识 LLM 类型，以后可能独立到 aa-util。
 aa_http_client = { path = "../aa-stack/packages/util/aa_http_client" }
 

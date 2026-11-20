@@ -63,6 +63,22 @@ use std::pin::Pin;
 use futures::StreamExt;
 use futures::stream;
 
+/// 把错误展开成「原因链」。
+///
+/// reqwest 的 `Display` 只有最外层（`error sending request for url (...)`），真正的
+/// 原因——连接被拒、代理握手失败、证书错误——藏在 `source()` 里。配置了代理之后，
+/// 不带原因链的报错基本没法定位（分不清是端点挂了还是代理挂了）。
+pub(crate) fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 /// 鉴权方式（wire 细节，只有本 crate 关心）。
 enum Auth {
     /// `Authorization: Bearer <key>`（OpenAI 与多数兼容端点）。
@@ -127,6 +143,41 @@ impl OpenAiLanguageModelProvider {
         self
     }
 
+    /// 出站代理（`http://` / `https://`，可带 `user:pass@`）。
+    ///
+    /// 语义对齐 Zed 的顶层 `proxy` 设置：显式设置后**不再**读环境变量代理
+    /// （`ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`）——reqwest 一旦显式加 proxy
+    /// 就会关掉 `auto_sys_proxy`。`NO_PROXY` 的绕过列表仍然生效。
+    ///
+    /// 不调用本方法时保持 reqwest 默认：自动读环境变量代理。
+    ///
+    /// 返回 `Result` 是因为 URL 解析和客户端构建都可能失败；调用发生在构造期，
+    /// 不在 `.await` 之后。
+    pub fn with_proxy(
+        mut self,
+        proxy_url: impl AsRef<str>,
+    ) -> Result<Self, aa_language_model::provider::LlmError> {
+        let proxy_url = proxy_url.as_ref();
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|error| {
+            aa_language_model::provider::LlmError::Unsupported(format!(
+                "代理 `{proxy_url}` 无效：{error}"
+            ))
+        })?;
+        // 显式代理仍然尊重 NO_PROXY（NO_PROXY 是「哪些主机直连」，与走哪个代理无关）。
+        let proxy = proxy.no_proxy(reqwest::NoProxy::from_env());
+
+        self.http = reqwest::Client::builder()
+            .proxy(proxy)
+            .build()
+            .map_err(|error| {
+                aa_language_model::provider::LlmError::Transport(format!(
+                    "构建带代理的 HTTP 客户端失败：{}",
+                    crate::describe_error(&error)
+                ))
+            })?;
+        Ok(self)
+    }
+
     /// 把鉴权与额外 header 变成 `HeaderMap`。
     ///
     /// 在进入 future 之前同步调用：非法 header 名/值直接变成错误，不 panic、不发请求。
@@ -175,7 +226,9 @@ impl OpenAiLanguageModelProvider {
             .headers(headers)
             .send()
             .await
-            .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
+            .map_err(|e| {
+                aa_language_model::provider::LlmError::Transport(crate::describe_error(&e))
+            })?;
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
@@ -187,10 +240,9 @@ impl OpenAiLanguageModelProvider {
             });
         }
 
-        let list: crate::models::ModelList = resp
-            .json()
-            .await
-            .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
+        let list: crate::models::ModelList = resp.json().await.map_err(|e| {
+            aa_language_model::provider::LlmError::Transport(crate::describe_error(&e))
+        })?;
         Ok(list.data)
     }
 }
@@ -237,7 +289,9 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
                 .body(body)
                 .send()
                 .await
-                .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
+                .map_err(|e| {
+                    aa_language_model::provider::LlmError::Transport(crate::describe_error(&e))
+                })?;
 
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
@@ -256,10 +310,10 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
                 return Ok(sse_event_stream(resp.bytes_stream()));
             }
 
-            let parsed: crate::chat_completion::response::ChatCompletionResponse = resp
-                .json()
-                .await
-                .map_err(|e| aa_language_model::provider::LlmError::Transport(e.to_string()))?;
+            let parsed: crate::chat_completion::response::ChatCompletionResponse =
+                resp.json().await.map_err(|e| {
+                    aa_language_model::provider::LlmError::Transport(crate::describe_error(&e))
+                })?;
             Ok(stream::iter(non_streaming_events(parsed)).boxed())
         })
     }
@@ -365,7 +419,7 @@ where
                     state
                         .pending
                         .push_back(Err(aa_language_model::provider::LlmError::Transport(
-                            err.to_string(),
+                            crate::describe_error(&err),
                         )));
                 }
                 None => {
@@ -834,6 +888,31 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn proxy_is_configuration_not_code() {
+        let provider = crate::OpenAiLanguageModelProvider::new("sk-test")
+            .with_base_url("https://api.example.com/v1")
+            .with_proxy("http://127.0.0.1:8080")
+            .expect("合法代理 URL 应该能构造客户端");
+        // 代理只影响 reqwest 客户端；鉴权/base_url 不受影响。
+        assert_eq!(
+            provider.headers().unwrap()["authorization"]
+                .to_str()
+                .unwrap(),
+            "Bearer sk-test"
+        );
+    }
+
+    #[test]
+    fn invalid_proxy_url_is_an_error_not_a_panic() {
+        // `host:port` 会被 reqwest 当成 http 代理（容错行为）；真正非法的是坏 URL。
+        let error = crate::OpenAiLanguageModelProvider::new("sk-test")
+            .with_proxy("http://")
+            .err()
+            .expect("坏代理 URL 应该报错");
+        assert!(error.to_string().contains("代理"), "{error}");
     }
 
     #[test]

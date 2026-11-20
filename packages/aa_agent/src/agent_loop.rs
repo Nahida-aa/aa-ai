@@ -19,28 +19,31 @@ use crate::tool;
 /// 循环里 LLM 最多连续调工具的轮数（防 LLM 死循环调工具）。
 const MAX_TOOL_ROUNDS: usize = 25;
 
-/// agent 循环。持有 LLM 客户端 + 工具注册表 + 一个固定 `provider::Model`。
-pub struct AgentLoop<'a> {
-    llm: &'a dyn provider::LanguageModelClient,
-    model: provider::Model,
+/// agent 循环。持有 LLM 客户端 + 工具注册表；模型按调用传。
+///
+/// 模型不在构造时钉死（对齐 pi `Agent.streamFunction(model, ...)`）：同一轮
+/// 会话里可以按需换模型（便宜的模型跑工具轮、贵的模型出最终答案；失败降级），
+/// 循环本身也不必带生命周期，可以存进会话结构。
+pub struct AgentLoop {
+    llm: Arc<dyn provider::LanguageModelClient>,
     tools: tool::AgentToolRegistry,
 }
 
-impl<'a> AgentLoop<'a> {
+impl AgentLoop {
     pub fn new(
-        llm: &'a dyn provider::LanguageModelClient,
-        model: provider::Model,
+        llm: Arc<dyn provider::LanguageModelClient>,
         tools: tool::AgentToolRegistry,
     ) -> Self {
-        Self { llm, model, tools }
+        Self { llm, tools }
     }
 
-    /// 跑一次任务：输入消息 + 系统提示，流式回文本（通过 `events` 回调），
+    /// 跑一次任务：输入模型 + 消息 + 系统提示，流式回文本（通过 `events` 回调），
     /// 期间自动执行 LLM 要求的工具，直到 LLM 收敛。
     ///
     /// 返回累积的文本回复（不含工具中间结果）。工具执行进度通过 `events` 上报。
     pub async fn run(
         &self,
+        model: &provider::Model,
         system: &str,
         user: &str,
         events: &impl tool::ToolEvents,
@@ -69,7 +72,7 @@ impl<'a> AgentLoop<'a> {
                 ..Default::default()
             };
 
-            let mut stream = self.llm.stream_completion(&self.model, &request).await?;
+            let mut stream = self.llm.stream_completion(model, &request).await?;
 
             // 本轮模型说了什么。文本先攒着，工具调用按出现顺序记下。
             let mut round_text = String::new();
@@ -252,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_tool_call_before_results_and_feeds_them_back() {
-        let client = ScriptedClient::new([
+        let client = Arc::new(ScriptedClient::new([
             vec![
                 provider::CompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
@@ -266,13 +269,21 @@ mod tests {
                 provider::CompletionEvent::Text("done".to_owned()),
                 provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
             ],
-        ]);
+        ]));
 
         let registry = tool::AgentToolRegistry::new();
         registry.register(Arc::new(Echo));
 
-        let agent = AgentLoop::new(&client, provider::Model::new("stub", "test"), registry);
-        let reply = agent.run("sys", "hello", &NoEvents).await.unwrap();
+        let agent = AgentLoop::new(client.clone(), registry);
+        let reply = agent
+            .run(
+                &provider::Model::new("stub", "test"),
+                "sys",
+                "hello",
+                &NoEvents,
+            )
+            .await
+            .unwrap();
         assert_eq!(reply, "done");
 
         let seen = client.seen.lock().unwrap();
@@ -301,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn reasoning_is_recorded_before_text_and_never_returned() {
         // 第一轮：思考 + 调工具；第二轮：文本。看第二轮请求里的 assistant 消息。
-        let client = ScriptedClient::new([
+        let client = Arc::new(ScriptedClient::new([
             vec![
                 provider::CompletionEvent::Reasoning {
                     text: "thin".to_owned(),
@@ -323,13 +334,16 @@ mod tests {
                 provider::CompletionEvent::Text("done".to_owned()),
                 provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
             ],
-        ]);
+        ]));
 
         let registry = tool::AgentToolRegistry::new();
         registry.register(Arc::new(Echo));
 
-        let agent = AgentLoop::new(&client, provider::Model::new("stub", "test"), registry);
-        let reply = agent.run("", "hi", &NoEvents).await.unwrap();
+        let agent = AgentLoop::new(client.clone(), registry);
+        let reply = agent
+            .run(&provider::Model::new("stub", "test"), "", "hi", &NoEvents)
+            .await
+            .unwrap();
         // 思考不进入返回文本。
         assert_eq!(reply, "done");
 
@@ -350,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_failure_is_a_result_not_a_transport_error() {
-        let client = ScriptedClient::new([
+        let client = Arc::new(ScriptedClient::new([
             vec![
                 provider::CompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
@@ -364,13 +378,12 @@ mod tests {
                 provider::CompletionEvent::Text("recovered".to_owned()),
                 provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
             ],
-        ]);
-        let agent = AgentLoop::new(
-            &client,
-            provider::Model::new("stub", "test"),
-            tool::AgentToolRegistry::new(),
-        );
-        let reply = agent.run("", "hi", &NoEvents).await.unwrap();
+        ]));
+        let agent = AgentLoop::new(client.clone(), tool::AgentToolRegistry::new());
+        let reply = agent
+            .run(&provider::Model::new("stub", "test"), "", "hi", &NoEvents)
+            .await
+            .unwrap();
         assert_eq!(reply, "recovered");
 
         let seen = client.seen.lock().unwrap();

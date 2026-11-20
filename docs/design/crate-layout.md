@@ -24,13 +24,18 @@
 | crate | 路径 | 职责 | 依赖 |
 |---|---|---|---|
 | `aa_language_model` | `packages/aa_language_model/` | canonical IR（`request::*`）+ `provider::LanguageModelClient` trait / 错误 / 事件 / `Model` | 无网络依赖 |
-| `aa_ai_openai` | `packages/aa_language_models/aa_ai_openai/` | OpenAI Chat Completions 的 wire DTO + encoder + HTTP 客户端 | core + `reqwest` |
-| `aa_ai_deepseek`（待建） | `packages/aa_language_models/aa_ai_deepseek/` | 常见厂商：自有 encoder，差异写在自己 crate 里 | core + `reqwest`（可按需复用 `aa_ai_openai` 的 DTO） |
+| `aa_http_client` | `aa-stack/packages/util/aa_http_client/`（**库外**） | 共享 HTTP 传输：一个进程一个连接池；代理 / 超时 / keep-alive / 错误文案 | `reqwest`（不认识 LLM 类型） |
+| `aa_ai_openai` | `packages/aa_language_models/aa_ai_openai/` | OpenAI Chat Completions 的 wire DTO + encoder + 发请求 | core + `aa_http_client` |
+| `aa_ai_deepseek`（待建） | `packages/aa_language_models/aa_ai_deepseek/` | 常见厂商：自有 encoder，差异写在自己 crate 里 | core + `aa_http_client`（可按需复用 `aa_ai_openai` 的 DTO） |
 | `aa_ai_openrouter`（待建） | `packages/aa_language_models/aa_ai_openrouter/` | 同上（额外 header、usage 字段） | 同上 |
-| `aa_ai_anthropic`（待建） | `packages/aa_language_models/aa_ai_anthropic/` | 另一套协议（Messages + 签名 thinking） | core + `reqwest` |
+| `aa_ai_anthropic`（待建） | `packages/aa_language_models/aa_ai_anthropic/` | 另一套协议（Messages + 签名 thinking） | core + `aa_http_client` |
 | `aa_ai_gemini` / `aa_ai_ollama`（待建） | 同上 | 各自协议（generateContent / 原生 `/api/chat`） | 同上 |
 | `aa_language_models` | `packages/aa_language_models/` | provider 汇总入口 + 离线 `stub::StubClient` | 各 `aa_ai_*` + core |
 | `aa_agent` | `packages/aa_agent/` | agent loop + 工具执行接口 | core |
+
+> `aa_http_client` 放在 `aa-stack` 而不是本仓：它和 LLM 无关，是通用基础设施
+> （用户 2026-11-20 决定）。`aa_language_model` 仍然零网络依赖，provider crate
+> 只把它当构造参数收下。[0010](../decisions/0010-transport-object.md)
 
 ### 2.0 协议 crate 与厂商 crate 的差别
 
@@ -52,11 +57,17 @@ aa_ai_deepseek ──┼──> aa_language_model   （IR + trait）
 aa_ai_*    ──┘
 aa_language_models（汇总）─┘
 
+aa_ai_* ──> aa_http_client（aa-stack，共享连接池）
+
 aa_agent ──> aa_language_model
 ```
 
 - **core 不认识任何厂商的 JSON 字段，也不依赖 `reqwest`。** 加一家 provider = 新增
   一个 `aa_ai_*` crate，core 一行不改。
+- **传输不归 provider**：`reqwest::Client` 只在 `aa_http_client` 里**构造**，provider
+  收一个 `Arc<aa_http_client::HttpClient>` 并调 `http.reqwest()` 发请求。provider
+  crate 仍然依赖 `reqwest`（要用 `HeaderMap` / `reqwest::Error` / `bytes_stream()`），
+  但没有任何构造客户端的代码。
 - `aa_language_models` 只做**命名空间转发**（`openai::OpenAiLanguageModelProvider`、
   `stub::StubClient`），不摊平 IR 类型：`request::Request` 只有
   `aa_language_model::request::Request` 一条规范路径。

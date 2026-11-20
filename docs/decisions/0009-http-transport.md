@@ -88,8 +88,16 @@ timeout，header 阶段另有一个 `stream_header_timeout`。
   `normalize_proxy`。
 - 不提供 `proxy_no_verify`（那是 Copilot 专用），也不替子进程注入代理环境变量
   （应用层的事）。
-- 不提供「强制直连」的公共入口：是否允许绕过环境变量代理是应用层的设置语义。
-  测试里用私有的 `ProxyMode::Direct`，不进公共 API。
+- 不提供「强制直连」的 provider 入口：是否允许绕过环境变量代理是应用层的设置
+  语义。该能力作为 `aa_http_client::Proxy::Direct` 存在——它是**传输构造**的
+  选项，不是 provider 的策略（0010 之后代理/超时不再挂在 provider 上）。
+
+> **附录（2026-11-20，[0010](0010-transport-object.md)）**：本文的取值不变，
+> 但 `read_timeout` / `connect_timeout` / keep-alive / 代理的**归属**从
+> `aa_ai_openai::OpenAiLanguageModelProvider` 移到了独立的
+> `aa_http_client::HttpClient`。`with_proxy` / `with_read_timeout` /
+> `without_read_timeout` 已删除；库层构造失败的错误类型是
+> `aa_http_client::BuildError`，由应用层映射成自己的错误。
 
 ### D2. 超时与 keep-alive 取值
 
@@ -101,7 +109,7 @@ timeout，header 阶段另有一个 `stream_header_timeout`。
 | `http2_keep_alive_interval` | 15s | 需要 reqwest `http2` feature |
 | `http2_keep_alive_timeout` | 10s | |
 | `http2_keep_alive_while_idle` | `true` | |
-| `read_timeout` | 默认 120s | 每次 body read 的 idle；`with_read_timeout` / `without_read_timeout` 可改 |
+| `read_timeout` | 默认 120s | 每次 body read 的 idle（入口在 `aa_http_client::Builder`，见 [0010](0010-transport-object.md)） |
 
 120s 的理由：常见 provider 的 SSE keep-alive 间隔是 15–30s，推理静默按「数十秒」
 估算；120s 给它留出数倍余量，同时能把「已经死掉的连接」在用户失去耐心前打断。

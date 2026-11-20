@@ -22,18 +22,24 @@
 //! 解好的**端点数据，调用方按自己的配置构造实例：
 //!
 //! ```no_run
+//! use std::sync::Arc;
+//!
 //! use aa_ai_openai::OpenAiLanguageModelProvider;
 //!
-//! let provider = OpenAiLanguageModelProvider::new("sk-...")
+//! // 一个进程一个连接池：应用构造一次，所有 provider 共享。
+//! let http = Arc::new(aa_http_client::HttpClient::builder().build()?);
+//!
+//! let provider = OpenAiLanguageModelProvider::new(http.clone(), "sk-...")
 //!     .with_base_url("https://api.example.com/v1")
 //!     .with_header("HTTP-Referer", "https://app.example.com")
 //!     .with_header("X-Title", "my-app");
 //! // 本地无鉴权端点：
-//! let local = OpenAiLanguageModelProvider::without_auth()
+//! let local = OpenAiLanguageModelProvider::without_auth(http.clone())
 //!     .with_base_url("http://localhost:11434/v1");
 //! // 非 Bearer 鉴权（Azure 式）：
-//! let azure = OpenAiLanguageModelProvider::without_auth()
+//! let azure = OpenAiLanguageModelProvider::without_auth(http.clone())
 //!     .with_auth_header("api-key", "secret");
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! 这就是「长尾兼容端点」那一档（[ADR 0008]）：端点、鉴权、额外 header 都是构造数据，
@@ -53,14 +59,14 @@
 //! 既实现 `LanguageModelProvider`（注册）又实现 `LanguageModelClient`（发请求），
 //! 我们这里只有后者，因为「注册」那一半属于 `aa_language_models`。
 //!
-//! # 传输策略
+//! # 传输
 //!
-//! 所有实例共用一套 HTTP 传输配置（对齐 Zed `ReqwestClient::builder`）：10s 建连、
-//! 30s TCP keep-alive / 连接池空闲回收、HTTP/2 keep-alive 15s/10s；读取有 120s 的
-//! per-read idle 超时（收到任何字节就重置，不是整请求总时长），可用
-//! [`OpenAiLanguageModelProvider::with_read_timeout`] 调整。代理见
-//! [`OpenAiLanguageModelProvider::with_proxy`]。决策记录见
-//! [`docs/decisions/0009-http-transport.md`](../../../docs/decisions/0009-http-transport.md)。
+//! 本 crate **不拥有** HTTP 客户端：一个进程一个连接池，由调用方构造
+//! `Arc<aa_http_client::HttpClient>` 后传进来（见
+//! [`docs/decisions/0010-transport-object.md`](../../../docs/decisions/0010-transport-object.md)）。
+//! 超时/keep-alive/代理策略都在 `aa_http_client`（对齐 Zed `ReqwestClient::builder`）：
+//! 10s 建连、30s TCP keep-alive / 连接池空闲回收、HTTP/2 keep-alive 15s/10s、
+//! 120s per-read idle 超时（收到任何字节就重置，不是整请求总时长）。
 
 pub mod chat_completion;
 pub mod models;
@@ -68,147 +74,11 @@ pub mod models;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream;
-
-// ---------- HTTP 传输策略 ----------
-//
-// 超时/keep-alive 取值对齐 Zed `crates/reqwest_client/src/reqwest_client.rs`
-// 的 `ReqwestClient::builder`（commit `4ed72e0135`）。区别只在 read_timeout：
-// Zed 的 LLM 入口目前传 `None`，我们默认开启（见 [`DEFAULT_READ_TIMEOUT`]）。
-
-/// 建连超时（DNS + TCP + TLS + 代理握手）。
-///
-/// 没有它，坏网络或挂掉的代理会让 `.send()` 长时间悬着，用户只看到「没反应」。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// TCP keep-alive：让 NAT/中间设备看到连接仍然活跃。
-const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
-
-/// 空闲连接在池里放多久后丢弃。
-///
-/// 尽早丢掉「静默坏掉」的复用连接（NAT 超时、链路重置）：stale HTTP/2 连接
-/// 是长连接端点 `BadRecordMac` 一类 TLS 错误的常见来源。
-const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// HTTP/2 PING 间隔与等待 PONG 的上限。
-const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
-const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// 流式读取的默认 idle 超时：连续这么久没收到**任何字节**就放弃。
-///
-/// 这是「两次读取之间」的上限，**不是整请求总时长**：只要 provider 还在发增量
-/// （包括 SSE 注释形式的 keep-alive），计时就会重置。取 120s 是因为推理阶段
-/// 可能静默数十秒，而常见 provider 的 keep-alive 间隔是 15–30s；它只用来抓
-/// 「连接已经死了，但 TCP 还没报错」的情况。
-pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// 出站路由。改它必须重建 [`reqwest::Client`]，所以和 `http` 一起存在实例上。
-enum ProxyMode {
-    /// 跟随环境变量（`ALL_PROXY` / `HTTPS_PROXY` / `NO_PROXY`），reqwest 默认。
-    Environment,
-    /// 显式代理 URL（`http://` / `https://`，可带 `user:pass@`）。
-    Explicit(String),
-    /// 强制直连，忽略环境变量代理。只给测试用：是否允许「直连」是应用层的
-    /// 设置语义，不是库要暴露的策略。
-    #[cfg(test)]
-    Direct,
-}
-
-/// 按传输策略构造客户端。所有构造入口（`new` / `with_proxy` / ...）都走这里，
-/// 避免某个 setter 重建客户端时把超时配置丢掉。
-fn build_client(
-    proxy: &ProxyMode,
-    read_timeout: Option<Duration>,
-) -> Result<reqwest::Client, aa_language_model::provider::LlmError> {
-    use aa_language_model::provider::LlmError;
-
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .tcp_keepalive(TCP_KEEPALIVE)
-        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
-        .http2_keep_alive_interval(HTTP2_KEEP_ALIVE_INTERVAL)
-        .http2_keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
-        .http2_keep_alive_while_idle(true);
-
-    if let Some(read_timeout) = read_timeout {
-        builder = builder.read_timeout(read_timeout);
-    }
-
-    match proxy {
-        ProxyMode::Environment => {}
-        #[cfg(test)]
-        ProxyMode::Direct => {
-            builder = builder.no_proxy();
-        }
-        ProxyMode::Explicit(proxy_url) => {
-            let proxy = reqwest::Proxy::all(proxy_url.as_str()).map_err(|error| {
-                LlmError::Unsupported(format!("代理 `{proxy_url}` 无效：{error}"))
-            })?;
-            // 显式代理仍然尊重 NO_PROXY（NO_PROXY 是「哪些主机直连」，与走哪个代理无关）。
-            builder = builder.proxy(proxy.no_proxy(reqwest::NoProxy::from_env()));
-        }
-    }
-
-    builder.build().map_err(|error| {
-        LlmError::Transport(format!("构建 HTTP 客户端失败：{}", describe_error(&error)))
-    })
-}
-
-/// 把错误展开成「原因链」。
-///
-/// reqwest 的 `Display` 只有最外层（`error sending request for url (...)`），真正的
-/// 原因——连接被拒、代理握手失败、证书错误——藏在 `source()` 里。配置了代理之后，
-/// 不带原因链的报错基本没法定位（分不清是端点挂了还是代理挂了）。
-pub(crate) fn describe_error(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
-}
-
-/// reqwest 错误 → 面向用户的文案。
-///
-/// 超时单独标出来：`read_timeout` 触发时 reqwest 的 `Display` 往往只是
-/// `error decoding response body`，不点明「多久没收到数据」就分不清是端点慢、
-/// 代理挂了还是连接已经被中间设备断开。
-fn describe_transport(error: &reqwest::Error, read_timeout: Option<Duration>) -> String {
-    let detail = describe_error(error);
-    // `is_connect()` 也可能同时 `is_timeout()`（建连超时），先判连接阶段。
-    if error.is_connect() {
-        let kind = if error.is_timeout() {
-            "连接超时"
-        } else {
-            "连接失败"
-        };
-        return format!("{kind}（DNS/TCP/TLS/代理握手）: {detail}");
-    }
-    if error.is_timeout() {
-        return match read_timeout {
-            Some(timeout) => format!(
-                "读取超时：连续 {} 没有收到任何数据（连接可能已被代理或中间设备断开）: {detail}",
-                format_duration(timeout)
-            ),
-            None => format!("请求超时: {detail}"),
-        };
-    }
-    detail
-}
-
-/// 超时文案里的时长：`120 秒` / `200 毫秒`（避免亚秒级显示成「0 秒」）。
-fn format_duration(duration: Duration) -> String {
-    if duration.as_secs() > 0 {
-        format!("{} 秒", duration.as_secs())
-    } else {
-        format!("{} 毫秒", duration.as_millis())
-    }
-}
 
 /// 鉴权方式（wire 细节，只有本 crate 关心）。
 enum Auth {
@@ -221,41 +91,36 @@ enum Auth {
 }
 
 /// OpenAI / OpenAI 兼容端点的 provider。
+///
+/// 只持有**端点数据**；HTTP 客户端是共享的 `Arc<aa_http_client::HttpClient>`。
 pub struct OpenAiLanguageModelProvider {
     auth: Auth,
     /// 默认 `https://api.openai.com/v1`；可指向 Ollama / vLLM / 第三方网关。
     base_url: String,
     /// 额外请求 header（`(name, value)`，按顺序追加，同名后者覆盖前者）。
     headers: Vec<(String, String)>,
-    http: reqwest::Client,
-    /// 出站路由；改它需要重建 `http`。
-    proxy: ProxyMode,
-    /// 每次读取的 idle 超时；`None` = 不设。
-    read_timeout: Option<Duration>,
+    http: Arc<aa_http_client::HttpClient>,
 }
 
 impl OpenAiLanguageModelProvider {
     /// 用 Bearer 鉴权构造。
-    pub fn new(api_key: impl Into<String>) -> Self {
-        Self::with_auth(Auth::Bearer(api_key.into()))
+    pub fn new(http: Arc<aa_http_client::HttpClient>, api_key: impl Into<String>) -> Self {
+        Self::with_auth(http, Auth::Bearer(api_key.into()))
     }
 
     /// 不发送 `Authorization`（本地或网关自带鉴权时用）。
     ///
     /// 不要用 `new("")` 代替：那会发出空的 `Authorization: Bearer `，部分端点会 400。
-    pub fn without_auth() -> Self {
-        Self::with_auth(Auth::None)
+    pub fn without_auth(http: Arc<aa_http_client::HttpClient>) -> Self {
+        Self::with_auth(http, Auth::None)
     }
 
-    fn with_auth(auth: Auth) -> Self {
+    fn with_auth(http: Arc<aa_http_client::HttpClient>, auth: Auth) -> Self {
         Self {
             auth,
             base_url: "https://api.openai.com/v1".into(),
             headers: Vec::new(),
-            http: build_client(&ProxyMode::Environment, Some(DEFAULT_READ_TIMEOUT))
-                .expect("默认 HTTP 客户端配置必须有效"),
-            proxy: ProxyMode::Environment,
-            read_timeout: Some(DEFAULT_READ_TIMEOUT),
+            http,
         }
     }
 
@@ -278,53 +143,6 @@ impl OpenAiLanguageModelProvider {
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
-    }
-
-    /// 出站代理（`http://` / `https://`，可带 `user:pass@`）。
-    ///
-    /// 语义对齐 Zed 的顶层 `proxy` 设置：显式设置后**不再**读环境变量代理
-    /// （`ALL_PROXY` / `HTTPS_PROXY` / `HTTP_PROXY`）——reqwest 一旦显式加 proxy
-    /// 就会关掉 `auto_sys_proxy`。`NO_PROXY` 的绕过列表仍然生效。
-    ///
-    /// 不调用本方法时保持 reqwest 默认：自动读环境变量代理。
-    ///
-    /// **只负责机制，不负责策略**：这里接收的是应用层已经解好的 URL。
-    /// 「哪个配置键叫 `proxy`」「空串 = 跟随环境变量」「拒绝 socks」都是应用层
-    /// 设置（aacode 的 `normalize_proxy`）的事，库不读配置也不读 env。
-    ///
-    /// 返回 `Result` 是因为 `reqwest::Proxy::all` 会解析 URL、构建客户端也可能
-    /// 失败；这是传输构造错误，不是「代理设置校验」。调用发生在构造期，不在
-    /// `.await` 之后。
-    pub fn with_proxy(
-        mut self,
-        proxy_url: impl AsRef<str>,
-    ) -> Result<Self, aa_language_model::provider::LlmError> {
-        let mode = ProxyMode::Explicit(proxy_url.as_ref().to_owned());
-        self.http = build_client(&mode, self.read_timeout)?;
-        self.proxy = mode;
-        Ok(self)
-    }
-
-    /// 覆盖流式读取的 idle 超时（默认 [`DEFAULT_READ_TIMEOUT`]）。
-    ///
-    /// 这是「两次收到字节之间的最长间隔」，不是整请求总时长：健康的流式响应只要
-    /// 持续有增量（包括 provider 的 SSE keep-alive 注释）就不会被中断。注意它同时
-    /// 约束非流式响应：非流式请求在生成完成前收不到任何 body 字节，所以等价的
-    /// 是「首字节上限」。
-    pub fn with_read_timeout(
-        mut self,
-        timeout: Duration,
-    ) -> Result<Self, aa_language_model::provider::LlmError> {
-        self.http = build_client(&self.proxy, Some(timeout))?;
-        self.read_timeout = Some(timeout);
-        Ok(self)
-    }
-
-    /// 关闭读取 idle 超时。只有调用方自己负责取消（或端点确实需要无限静默）时才用。
-    pub fn without_read_timeout(mut self) -> Result<Self, aa_language_model::provider::LlmError> {
-        self.http = build_client(&self.proxy, None)?;
-        self.read_timeout = None;
-        Ok(self)
     }
 
     /// 把鉴权与额外 header 变成 `HeaderMap`。
@@ -371,15 +189,13 @@ impl OpenAiLanguageModelProvider {
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let resp = self
             .http
+            .reqwest()
             .get(url)
             .headers(headers)
             .send()
             .await
             .map_err(|e| {
-                aa_language_model::provider::LlmError::Transport(crate::describe_transport(
-                    &e,
-                    self.read_timeout,
-                ))
+                aa_language_model::provider::LlmError::Transport(self.http.describe(&e))
             })?;
 
         let status = resp.status().as_u16();
@@ -393,10 +209,7 @@ impl OpenAiLanguageModelProvider {
         }
 
         let list: crate::models::ModelList = resp.json().await.map_err(|e| {
-            aa_language_model::provider::LlmError::Transport(crate::describe_transport(
-                &e,
-                self.read_timeout,
-            ))
+            aa_language_model::provider::LlmError::Transport(self.http.describe(&e))
         })?;
         Ok(list.data)
     }
@@ -436,21 +249,17 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
         };
         let http = self.http.clone();
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let read_timeout = self.read_timeout;
+        let read_timeout = http.read_timeout();
 
         Box::pin(async move {
             let resp = http
+                .reqwest()
                 .post(url)
                 .headers(headers)
                 .body(body)
                 .send()
                 .await
-                .map_err(|e| {
-                    aa_language_model::provider::LlmError::Transport(crate::describe_transport(
-                        &e,
-                        read_timeout,
-                    ))
-                })?;
+                .map_err(|e| aa_language_model::provider::LlmError::Transport(http.describe(&e)))?;
 
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
@@ -469,13 +278,10 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
                 return Ok(sse_event_stream(resp.bytes_stream(), read_timeout));
             }
 
-            let parsed: crate::chat_completion::response::ChatCompletionResponse =
-                resp.json().await.map_err(|e| {
-                    aa_language_model::provider::LlmError::Transport(crate::describe_transport(
-                        &e,
-                        read_timeout,
-                    ))
-                })?;
+            let parsed: crate::chat_completion::response::ChatCompletionResponse = resp
+                .json()
+                .await
+                .map_err(|e| aa_language_model::provider::LlmError::Transport(http.describe(&e)))?;
             Ok(stream::iter(non_streaming_events(parsed)).boxed())
         })
     }
@@ -587,7 +393,7 @@ where
                     state
                         .pending
                         .push_back(Err(aa_language_model::provider::LlmError::Transport(
-                            crate::describe_transport(&err, read_timeout),
+                            aa_http_client::describe_transport(&err, read_timeout),
                         )));
                 }
                 None => {
@@ -614,14 +420,14 @@ mod tests {
         aa_language_model::provider::Model::new("openai", id)
     }
 
-    /// 测试专用：绕过环境变量代理，保证请求打到本地假端点。
-    fn force_direct(
-        mut provider: crate::OpenAiLanguageModelProvider,
-    ) -> crate::OpenAiLanguageModelProvider {
-        provider.http =
-            crate::build_client(&crate::ProxyMode::Direct, provider.read_timeout).unwrap();
-        provider.proxy = crate::ProxyMode::Direct;
-        provider
+    /// 测试专用传输：绕过环境变量代理，保证请求打到本地假端点。
+    fn direct_http(read_timeout: Option<Duration>) -> Arc<aa_http_client::HttpClient> {
+        let mut builder =
+            aa_http_client::HttpClient::builder().proxy(aa_http_client::Proxy::Direct);
+        if let Some(timeout) = read_timeout {
+            builder = builder.read_timeout(timeout);
+        }
+        Arc::new(builder.build().expect("测试用 HTTP 客户端必须能构造"))
     }
 
     #[test]
@@ -1070,31 +876,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn proxy_is_configuration_not_code() {
-        let provider = crate::OpenAiLanguageModelProvider::new("sk-test")
-            .with_base_url("https://api.example.com/v1")
-            .with_proxy("http://127.0.0.1:8080")
-            .expect("合法代理 URL 应该能构造客户端");
-        // 代理只影响 reqwest 客户端；鉴权/base_url 不受影响。
-        assert_eq!(
-            provider.headers().unwrap()["authorization"]
-                .to_str()
-                .unwrap(),
-            "Bearer sk-test"
-        );
-    }
-
-    #[test]
-    fn invalid_proxy_url_is_an_error_not_a_panic() {
-        // `host:port` 会被 reqwest 当成 http 代理（容错行为）；真正非法的是坏 URL。
-        let error = crate::OpenAiLanguageModelProvider::new("sk-test")
-            .with_proxy("http://")
-            .err()
-            .expect("坏代理 URL 应该报错");
-        assert!(error.to_string().contains("代理"), "{error}");
-    }
-
     // ---------- 超时 ----------
 
     /// 起一个只吐一帧 SSE 然后卡住的假端点：验证 idle 超时在**有数据之后**触发，
@@ -1145,13 +926,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(500));
         });
 
-        let provider = crate::OpenAiLanguageModelProvider::without_auth()
-            .with_base_url(format!("http://{addr}/v1"))
-            .with_read_timeout(Duration::from_millis(150))
-            .unwrap();
-        // 测试机可能配了全局代理；强制直连，保证打到本地假端点。
-        // 「直连」不是库的公共策略，只在测试里改私有字段。
-        let provider = force_direct(provider);
+        let provider = crate::OpenAiLanguageModelProvider::without_auth(direct_http(Some(
+            Duration::from_millis(150),
+        )))
+        .with_base_url(format!("http://{addr}/v1"));
 
         let request = aa_language_model::request::Request {
             messages: vec![Arc::new(aa_language_model::request::message::Message::new(
@@ -1197,17 +975,8 @@ mod tests {
     }
 
     #[test]
-    fn timeout_durations_are_formatted_readably() {
-        assert_eq!(crate::format_duration(Duration::from_secs(120)), "120 秒");
-        assert_eq!(
-            crate::format_duration(Duration::from_millis(150)),
-            "150 毫秒"
-        );
-    }
-
-    #[test]
     fn endpoint_configuration_is_data_not_code() {
-        let provider = crate::OpenAiLanguageModelProvider::new("sk-test")
+        let provider = crate::OpenAiLanguageModelProvider::new(direct_http(None), "sk-test")
             .with_base_url("https://api.example.com/v1/")
             .with_header("HTTP-Referer", "https://app.example.com")
             .with_header("X-Title", "aa-ai");
@@ -1227,10 +996,10 @@ mod tests {
         );
 
         // 无鉴权时不发 Authorization；自定义 header 鉴权替换 Bearer。
-        let provider = crate::OpenAiLanguageModelProvider::without_auth();
+        let provider = crate::OpenAiLanguageModelProvider::without_auth(direct_http(None));
         assert!(provider.headers().unwrap().get("authorization").is_none());
 
-        let provider = crate::OpenAiLanguageModelProvider::without_auth()
+        let provider = crate::OpenAiLanguageModelProvider::without_auth(direct_http(None))
             .with_auth_header("api-key", "secret");
         assert_eq!(
             provider
@@ -1246,7 +1015,8 @@ mod tests {
 
     #[test]
     fn invalid_header_is_an_error_not_a_panic() {
-        let provider = crate::OpenAiLanguageModelProvider::new("k").with_header("bad header", "x");
+        let provider = crate::OpenAiLanguageModelProvider::new(direct_http(None), "k")
+            .with_header("bad header", "x");
         assert!(matches!(
             provider.headers(),
             Err(aa_language_model::provider::LlmError::Transport(_))

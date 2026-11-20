@@ -30,6 +30,7 @@ version = "0.1.0"
 name = "aa_ai_openai"
 version = "0.1.0"
 dependencies = [
+ "aa_http_client",
  "aa_language_model",
  "base64 0.22.1",
  "futures",
@@ -37,6 +38,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "aa_http_client"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "thiserror",
 ]
 
 [[package]]

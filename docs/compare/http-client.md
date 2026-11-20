@@ -108,22 +108,21 @@ self.proxy.as_deref()
 
 ## 5. 本仓（aa-ai）现状
 
-`packages/aa_language_models/aa_ai_openai/src/lib.rs`：
+传输已独立成 `aa-stack/packages/util/aa_http_client`（[ADR 0010](../decisions/0010-transport-object.md)），
+`aa_ai_openai` 只接收 `Arc<aa_http_client::HttpClient>`：
 
-- 所有构造入口（`new` / `without_auth` / `with_proxy` / `with_direct_connection` /
-  `with_read_timeout`）都走同一个 `build_client`，避免某个 setter 重建客户端时把
-  超时配置丢掉。
+- 一个进程一个连接池（`Arc` 共享），不再每个 provider 各建一个 `reqwest::Client`。
 - 常量与 Zed 对齐：`connect_timeout` 10s、`tcp_keepalive` 30s、
   `pool_idle_timeout` 30s、HTTP/2 keep-alive 15s / 10s / while-idle。
-- `DEFAULT_READ_TIMEOUT = 120s`，默认开启；`with_read_timeout` 覆盖，
+- `DEFAULT_READ_TIMEOUT = 120s`，默认开启；`Builder::read_timeout` 覆盖，
   `without_read_timeout` 关闭。语义是 reqwest 的 per-read idle（收到字节就重置）。
-- 代理：`Proxy::all` + `NoProxy::from_env`；URL 非法返回
-  `LlmError::Unsupported`（这是 reqwest 构造失败的上报，不是设置层校验）。
+- 代理：`Proxy::all` + `NoProxy::from_env`；`Proxy` 是三态值
+  （`Environment` / `Direct` / `Explicit`），**由调用方传进来**。URL 非法返回
+  `BuildError::InvalidProxy`（这是 reqwest 构造失败的上报，不是设置层校验）。
   「哪个键叫 `proxy`」「空串=环境变量」「拒绝 socks」「`http(s)://` 前缀」在
-  应用层 aacode 的 `normalize_proxy`；库不读配置/env，也没有「强制直连」的
-  公共入口（测试用私有 `ProxyMode::Direct`）。
-- 超时错误经 `describe_transport` 展开原因链，并区分「连接超时」与
-  「读取超时：连续 N 秒没有收到任何数据」。
+  应用层 aacode 的 `normalize_proxy`；库不读配置/env。
+- 超时/代理错误经 `aa_http_client::describe_transport` 展开原因链，并区分
+  「连接超时」与「读取超时：连续 N 秒没有收到任何数据」。
 - reqwest feature 为 `http2` + `rustls-tls-native-roots` + `json` + `stream`；
   没有 `system-proxy`（环境变量代理仍由 hyper-util 的 `from_env` 读取，
   `system-proxy` 只额外读 macOS/Windows 系统配置）。

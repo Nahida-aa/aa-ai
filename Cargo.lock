@@ -51,6 +51,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aa_ai_openrouter"
+version = "0.1.0"
+dependencies = [
+ "aa_http_client",
+ "aa_language_model",
+ "base64 0.22.1",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "aa_http_client"
 version = "0.1.0"
 dependencies = [
@@ -74,6 +88,7 @@ version = "0.1.0"
 dependencies = [
  "aa_ai_ollama",
  "aa_ai_openai",
+ "aa_ai_openrouter",
  "aa_language_model",
  "futures",
  "serde_json",

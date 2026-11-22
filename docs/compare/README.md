@@ -25,6 +25,7 @@
 | [`provider-extension.md`](provider-extension.md) | 四家怎么接长尾端点、怎么给常见厂商做区分度（三层：协议 / 常见厂商 / 长尾） |
 | [`http-client.md`](http-client.md) | 四家的 HTTP 客户端：代理解析、`NO_PROXY`、连接/读取超时、流式 idle 超时的实现位置 |
 | [`ollama-wire.md`](ollama-wire.md) | Ollama 原生 `/api/chat` 与 OpenAI chat completions 的逐字段差异（NDJSON、`thinking`、`tool_name`、`done_reason`） |
+| [`openrouter-wire.md`](openrouter-wire.md) | OpenRouter 与 OpenAI chat completions 的逐字段差异（`reasoning`/`reasoning_details`、数字错误码、流内错误、`pricing`、限流） |
 
 ## 源码克隆与 commit
 

@@ -2,6 +2,7 @@
 //!
 //! 这里**只做命名空间转发**，不摊平类型：
 //! - `openai::OpenAiLanguageModelProvider`：OpenAI / OpenAI 兼容端点；
+//! - `openrouter::OpenRouterLanguageModelProvider`：OpenRouter（chat completions + 厂商差异）；
 //! - `ollama::OllamaLanguageModelProvider`：Ollama 原生 `/api/chat`；
 //! - `stub::StubClient`：离线测试替身，不连网络、不花 token。
 //!
@@ -16,6 +17,11 @@
 /// OpenAI / OpenAI 兼容端点（`POST /chat/completions`，SSE）。
 pub mod openai {
     pub use aa_ai_openai::OpenAiLanguageModelProvider;
+}
+
+/// OpenRouter（`POST /chat/completions`，SSE；额外 header / 思考回放 / 数字错误码）。
+pub mod openrouter {
+    pub use aa_ai_openrouter::OpenRouterLanguageModelProvider;
 }
 
 /// Ollama 原生端点（`POST /api/chat`，NDJSON）。

@@ -84,6 +84,7 @@ docs/decisions/
 | [0009](0009-http-transport.md) | HTTP 传输：代理语义对齐 Zed；客户端级 per-read idle 超时（默认 120s）+ keep-alive 取值照 Zed | proposed（代理语义用户决定；超时值助手提案，已落地） | 2026-11-20 |
 | [0010](0010-transport-object.md) | 传输独立成 `aa_http_client`（aa-stack）：一个进程一个连接池，provider 只收 `Arc<HttpClient>`；agent loop 模型按调用传 | proposed（crate 位置与破坏性重构用户决定；接口形状助手提案） | 2026-11-20 |
 | [0011](0011-ollama-native.md) | Ollama 原生 `/api/chat`：NDJSON 解码、`thinking`、`tool_name` 关联、`done_reason` + 工具调用决定 `StopReason` | accepted（用户「按建议继续」；映射规则助手提案） | 2026-11-21 |
+| [0012](0012-openrouter-vendor.md) | OpenRouter 独立 crate：自写 encoder/DTO、`reasoning_details` 存 `signature`、流式 `Stop` 延后、`free` 字段 | accepted（独立 crate 用户决定；映射规则助手提案） | 2026-11-21 |
 
 ## 相关文档
 

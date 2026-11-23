@@ -65,12 +65,17 @@ OpenRouter 的对话接口是 OpenAI chat completions 的形状：同样的
 
 - `aa_ai_openrouter`：32 个单测 + 1 个 doctest（请求编码、SSE 解码、错误体、
   `pending_stop`、`/models` 解析、header）。
-- 端到端（真实 OpenRouter，经 mitmproxy，`/models` 为公开接口）：
+- 端到端（真实 OpenRouter，`/models` 为公开接口；`chat` / `run` 用
+  `OPENROUTER_API_KEY`）：
   - `aacode providers` 正常显示 `openrouter`；
   - `aacode models openrouter --free` 返回 14 个零价模型，
-    `--free` 过滤与 `[free]` 标记正常。
-- 未验证：真实 `chat` / `run`（缺 `OPENROUTER_API_KEY`）。免费模型限流是
-  20 req/min + 每日上限，验证时要观察 429 与 `Retry-After`。
+    `--free` 过滤与 `[free]` 标记正常；
+  - `aacode chat openrouter openrouter/free "…"`：流式思考 + 文本 + usage + `Stop`；
+  - `aacode run openrouter openrouter/free "…"`：一次 `glob` 工具调用，结果回灌后
+    第二轮收敛；
+  - 具体 `:free` 模型（gemma / ling）遇到上游共享池限流：HTTP 429、无
+    `Retry-After`，`metadata.raw` 说明是 `upstream_provider_shared_pool`；
+    `openrouter/free` 动态路由可绕开。
 
 ## 决策
 
@@ -133,7 +138,8 @@ OpenRouter 的 usage 帧在 `finish_reason` 之后。若收到 `finish_reason` �
 
 `ApiError { code: Option<i64>, message, metadata }`：
 
-- 非 2xx：`status` 取 HTTP status，`message` 拼上 `metadata.error_type`；
+- 非 2xx：`status` 取 HTTP status，`message` 拼上 `metadata.error_type`，
+  以及上游限流时真正的原因 `metadata.raw`；
 - 流内错误：`status = 200`，`transient` 由 `error_type` 与 code 判断；
 - 非流式 200：只有顶层 `error` → 直接报错；错误挂在 `choices[0].error` →
   先交付已生成内容，最后报错，**不补 `Stop`**（这次响应没有正常结束）。

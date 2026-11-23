@@ -214,15 +214,28 @@ impl ApiError {
         if let Some(error_type) = self.error_type() {
             out.push_str(&format!(" [{error_type}]"));
         }
+        // 上游 provider 的限流/失败把真正原因放在 `metadata.raw`（`message` 只是
+        // 通用的 "Provider returned error"）。不拼进来，用户只能看到 429。
+        if let Some(raw) = self.metadata_field("raw")
+            && raw != self.message
+        {
+            out.push_str(" — ");
+            out.push_str(raw);
+        }
         out
+    }
+
+    /// 从 `metadata` 里取一个字符串字段（`error_type` / `raw` / `limit_source` …）。
+    fn metadata_field(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(key))
+            .and_then(serde_json::Value::as_str)
     }
 
     /// `metadata.error_type`（OpenRouter 的稳定错误分类）。
     pub fn error_type(&self) -> Option<&str> {
-        self.metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("error_type"))
-            .and_then(serde_json::Value::as_str)
+        self.metadata_field("error_type")
     }
 
     /// 是否值得重试：限流、上游过载/不可用、超时。
@@ -895,6 +908,26 @@ mod tests {
                 assert!(message.contains("(code: 429)"));
                 assert!(message.contains("rate_limit_exceeded"));
                 assert!(*transient);
+            }
+            other => panic!("expected ProviderRejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upstream_error_detail_includes_metadata_raw() {
+        // 真实的免费模型限流响应：`message` 只是通用的 "Provider returned error"，
+        // 具体原因（哪个上游、为什么）在 `metadata.raw` 里。
+        let events = decode(&[
+            r#"{"error":{"code":429,"message":"Provider returned error","metadata":{"raw":"google/gemma-4-31b-it:free is temporarily rate-limited upstream","provider_name":"Google AI Studio","limit_source":"upstream_provider_shared_pool"}}}"#,
+        ]);
+
+        match &events[0] {
+            Err(LlmError::ProviderRejection { message, .. }) => {
+                assert!(message.contains("Provider returned error"), "{message}");
+                assert!(
+                    message.contains("temporarily rate-limited upstream"),
+                    "{message}"
+                );
             }
             other => panic!("expected ProviderRejection, got {other:?}"),
         }

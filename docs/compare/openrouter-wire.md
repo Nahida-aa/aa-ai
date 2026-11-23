@@ -96,8 +96,20 @@ OpenRouter 文档没有把 `HTTP-Referer` / `X-Title` 写成必需；Zed 只在�
 ```
 
 - `code` 是**数字**（HTTP 状态码），OpenAI 是字符串；
-- `metadata` 是开放对象；稳定字段是 `error_type`（见下）、`provider_code`，
-  以及预算类的 `limit_source` / `resolved_at` 等；
+- `metadata` 是开放对象；稳定字段是 `error_type`（见下）、`provider_code`
+  （实测上游限流时字段名是 `provider_error_code`），以及预算类的
+  `limit_source` / `resolved_at` 等；
+- 上游 provider 限流时 `message` 只是通用的 `"Provider returned error"`，真正原因
+  在 `metadata.raw`，并带 `provider_name` / `is_byok` / `remedy_hint`：
+
+```json
+{"error":{"message":"Provider returned error","code":429,"metadata":{
+  "raw":"google/gemma-4-31b-it:free is temporarily rate-limited upstream. ...",
+  "provider_name":"Google AI Studio","is_byok":false,
+  "provider_error_code":"429","limit_source":"upstream_provider_shared_pool",
+  "remedy_hint":"Retry shortly, add your own provider key ..."}}}
+```
+
 - HTTP status 与 `error.code` 相同。
 
 生成中途失败时 HTTP 已经是 `200`，错误出现在 body 里：
@@ -171,7 +183,8 @@ OpenRouter 文档没有把 `HTTP-Referer` / `X-Title` 写成必需；Zed 只在�
 - `chat_completion::response::StreamDecoder`：SSE 分帧；`reasoning` 文本增量与
   `reasoning_details` 增量分开处理，后者按 `index`（其次 `id`）归并、`text` /
   `summary` / `data` 拼接；`finish_reason` 先记下，等 usage 帧之后再发 `Stop`。
-- 错误：`ApiError{code,message,metadata}`；非 2xx、流内错误、非流式 200-body 错误
+- 错误：`ApiError{code,message,metadata}`；`detail()` 拼上 `metadata.error_type` 与
+  `metadata.raw`（上游限流的真正原因）；非 2xx、流内错误、非流式 200-body 错误
   统一成 `LlmError::ProviderRejection`（体内错误 `status` 记 200）。
 - `models::ModelInfo`：`id` / `name` / `context_length` / `pricing` /
   `supported_parameters`；`is_free()` 按 pricing 数值判断。

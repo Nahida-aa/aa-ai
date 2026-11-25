@@ -54,10 +54,10 @@ wire provider，没有任何厂商格式」。但 `aa_language_models` 依赖全
 - `FakeClient` 记录收到的每个 `request::Request`（克隆只复制 `Arc`），
   测试不用再自己写录制层。
 
-命名：用户选择叫 `fake`（和 Zed 对齐），CLI 标志同步为 `--fake`。按 Meszaros 的
-严格分类，这个实现是 scripted stub + spy——只回预置事件、记录请求，不模拟模型
-行为；`Fake` 表达的是「对调用方可用的 provider 替身」，不是「有完整行为的
-in-memory provider」。若以后加上 `expect_*` 期望断言，它就成了 mock，需要改名。
+命名：用户选择叫 `fake`（和 Zed 对齐），CLI 标志同步为 `--fake`。Meszaros 的
+stub 只描述「预置答案」这一种驱动方式；这里的 fake 更宽——可以回剧本，也可以
+用 `with_handler` 按请求现算（随机文本、按规则变化、注入错误），不必是预演好的。
+若以后加上 `expect_*` 期望断言，它就成了 mock，需要改名。
 
 ## 后果
 

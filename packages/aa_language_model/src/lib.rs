@@ -4,7 +4,8 @@
 //! - `request`：canonical IR（`request::Request`、`request::message::*`、`request::tools::*`）；
 //! - `provider`：`provider::LanguageModelClient` trait + 错误 + 事件类型。
 //!
-//! 打开 `fake` feature 后多一个 [`fake::FakeClient`]：离线剧本驱动的确定性替身。
+//! 打开 `fake` feature 后多一个 [`fake::FakeClient`]：离线替身，默认按预置剧本回事件，
+//! 也可以用 `with_handler` 按请求现算（随机内容、注入错误都行）。
 //! 它和 trait 放在同一 crate，是因为只依赖 IR + trait、不依赖任何厂商格式；
 //! 用 feature 门控，正常构建不会带上测试替身。
 //!

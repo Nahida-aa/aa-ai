@@ -86,7 +86,7 @@ for await (chunk in stream) { ... }   // 流式 LanguageModelCompletionEvent
 | `crates/acp_thread`（`AcpThread` + `ToolCall`） | ACP 会话接进 agent 面板；渲染 agent 报的工具调用 | 框架包（`ai-react`/…）+ `ai` 的工具结果消费 |
 | `crates/acp_tools` | ACP 连接调试日志面板 | 无直接对应（`ai-devtools` 概念近） |
 | Zed app 的会话历史/持久化/压缩 | 长对话状态管理 | `ai-persistence` + `ai-memory` + `ai-compaction` |
-| `crates/language_model_core/fake_provider` | 假 LLM provider（测试） | 手搓 mock adapter |
+| `crates/language_model/fake_provider` | 假 LLM provider（测试） | 手搓 mock adapter |
 
 ### 关于「TanStack 有两类提供商」
 
@@ -103,5 +103,5 @@ for await (chunk in stream) { ... }   // 流式 LanguageModelCompletionEvent
 ## 4. 对你「库 + 应用 agent」的含义
 
 - Zed 证明了「库形态的 provider adapter」是可行的：`LanguageModelRegistry` + `stream_completion` 就是 Zed 自己的 `chat({ adapter })`。你写库时，**LLM 层用 provider adapter 接口（对标 Zed 的 `stream_completion` / TanStack 的 `chat({ adapter })`）**，ACP 层单独做（对接外部 agent）。
-- Zed 的 `fake_provider` 说明**假 LLM provider 是标配**（测试里直接 `FakeLanguageModelProvider` + `send_text`/`end_stream`）。你的库也应内置一个 stub provider（本仓：`aa_language_model::stub`，`stub` feature 门控；汇总 crate 转发同一类型），比 TanStack 的「手搓 mock adapter」更省事。
+- Zed 的 `fake_provider` 说明**假 LLM provider 是标配**（测试里直接 `FakeLanguageModelProvider` + `send_text`/`end_stream`）。你的库也应内置一个 fake provider（本仓：`aa_language_model::fake`，`fake` feature 门控；汇总 crate 转发同一类型），比 TanStack 的「手搓 mock adapter」更省事。
 - 工具执行归属：你的 agent（应用侧）**自己执行工具**（读文件/写文件/跑命令），通过 ACP `tool_call` 报给 client（Zed 渲染 + 审批）。client 不提供工具——这正符合 ACP 的边界，也符合你「只支持 v2 agent」的决策。

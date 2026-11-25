@@ -24,16 +24,16 @@ packages/
   aa_language_model/                  IR + trait，零网络依赖
     request/    request::Request / request::message::* / request::tools::*
     provider/   provider::LanguageModelClient / LlmError / CompletionEvent
-    stub.rs     离线替身（stub feature）
+    fake.rs     离线替身（fake feature）
   aa_language_models/
     aa_ai_openai/       OpenAI wire DTO + encoder + HTTP 客户端（依赖 reqwest）
     aa_ai_anthropic/    待建
-    src/                汇总入口（openai::OpenAiLanguageModelProvider 等；stub 转发 core）
+    src/                汇总入口（openai::OpenAiLanguageModelProvider 等；fake 转发 core）
   aa_agent/
     agent_loop.rs       agent loop（消费 provider::LanguageModelClient + tool::AgentTool）
 ```
 
-> 之前这里写的是 `aa_language_model_core` 里带 `provider/openai.rs`、`provider/stub.rs`。
+> 之前这里写的是 `aa_language_model_core` 里带 `provider/openai.rs`、`provider/fake.rs`。
 > 那份布局会让 core 依赖 `reqwest`，且每加一家 provider 都要改 core。已按
 > [`crate-layout.md`](crate-layout.md) 改掉，OpenAI 实现落在
 > `packages/aa_language_models/aa_ai_openai/src`。
@@ -45,10 +45,10 @@ packages/
 ```
 顺序（被依赖的先写，写一点就能往下走）：
 1. aa_language_model: request（IR）+ provider（LanguageModelClient trait）
-2. aa_language_models: aa_ai_openai（第一家 wire 适配）；aa_language_model 的 stub feature（离线）
+2. aa_language_models: aa_ai_openai（第一家 wire 适配）；aa_language_model 的 fake feature（离线）
 3. aa_agent: agent_loop（消费 provider::LanguageModelClient + tool::AgentTool）
 4. aacode cli: 接线 + 写 2-3 个工具（read/write/edit）impl tool::AgentTool
-5. 跑通：stub LLM 调 read 工具（离线）→ OpenAI 真调（在线）
+5. 跑通：fake LLM 调 read 工具（离线）→ OpenAI 真调（在线）
 ```
 
 **关键**：IR/工具定义 和 工具实现 可以**并行**（工具定义不依赖 LLM 通信），
@@ -69,7 +69,7 @@ agent loop 依赖两者。所以不是串行等，是"接口/定义先立起来�
 
 ## 4. 一句话总结
 
-- **provider**（用户决定）：接口按多 provider 设计，v0 实现 1 家（OpenAI）+ 1 个 stub。
+- **provider**（用户决定）：接口按多 provider 设计，v0 实现 1 家（OpenAI）+ 1 个 fake。
   **一家 provider 一个 crate**（`aa_ai_*`），core 只有 IR + trait、零网络依赖。
 - **库/应用**（用户决定）：接口先行，IR 与工具实现并行，loop 居中。
 - **命名**（用户决定）：去 `_core`；类型名用「命名空间 + 短类型名」，

@@ -86,7 +86,7 @@ docs/decisions/
 | [0011](0011-ollama-native.md) | Ollama 原生 `/api/chat`：NDJSON 解码、`thinking`、`tool_name` 关联、`done_reason` + 工具调用决定 `StopReason` | accepted（用户「按建议继续」；映射规则助手提案） | 2026-11-21 |
 | [0012](0012-openrouter-vendor.md) | OpenRouter 独立 crate：自写 encoder/DTO、`reasoning_details` 存 `signature`、流式 `Stop` 延后、`free` 字段 | accepted（独立 crate 用户决定；映射规则助手提案） | 2026-11-21 |
 | [0013](0013-session-log.md) | 会话持久化：显式 `SessionEvent` JSONL，IR 保持零 serde；追加式、版本化、图片结果明确报错 | accepted（助手提案；用户要求先做会话而不是继续加 provider） | 2026-11-25 |
-| [0014](0014-stub-in-core.md) | 离线 stub 放 core（`stub` feature），汇总 crate 只转发；替身记录请求 | accepted（用户「现在就挪」） | 2026-11-25 |
+| [0014](0014-fake-in-core.md) | 离线 fake 放 core（`fake` feature），汇总 crate 只转发；替身记录请求 | accepted（用户「现在就挪」） | 2026-11-25 |
 
 ## 相关文档
 

@@ -34,7 +34,7 @@ agent 需要多轮会话：`chat` 之后还能接着聊，`run` 能恢复上次�
 - `aa_agent` 单测：文本 / 思考 + 签名 / 工具调用（JSON 与纯文本入参）/ 工具结果
   的 JSONL 往返；连续 `tool_result` 恢复后合并成一条 user 消息（和 agent loop
   发给模型的形状一致）。
-- 端到端（`run --stub`）：新建会话 → 落盘 → `--continue` 恢复，第二轮请求的
+- 端到端（`run --fake`）：新建会话 → 落盘 → `--continue` 恢复，第二轮请求的
   历史包含上一轮全部消息。
 - 反例：版本号不匹配、缺 header、重复 header、非法 JSON 行都会明确报错。
 

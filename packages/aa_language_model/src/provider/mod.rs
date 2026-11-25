@@ -4,7 +4,7 @@
 //! - `aa_language_model`（本 crate）：canonical IR + [`LanguageModelClient`] trait；
 //! - `aa_ai_openai` / `aa_ai_anthropic` / …：**一家一个 crate** 的 wire 适配；
 //! - `aa_language_models`：provider 汇总入口；
-//! - `stub`（本 crate，`stub` feature）：离线替身，不依赖任何厂商格式。
+//! - `fake`（本 crate，`fake` feature）：离线替身，不依赖任何厂商格式。
 //!
 //! core 不依赖 `reqwest`，也不认识任何厂商的 JSON 字段：加一家 provider = 新增一个
 //! crate，不动这里。对应 Zed 的 `language_model_core` + `open_ai` / `anthropic` /

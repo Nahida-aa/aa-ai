@@ -199,8 +199,8 @@ impl AgentLoop {
 
 #[cfg(test)]
 mod tests {
+    use aa_language_model::fake;
     use aa_language_model::request::message;
-    use aa_language_model::stub;
 
     use super::*;
 
@@ -235,7 +235,7 @@ mod tests {
     }
 
     fn session(system: &str) -> session::Session {
-        session::Session::new(session::Header::new("stub", "test", "", system)).unwrap()
+        session::Session::new(session::Header::new("fake", "test", "", system)).unwrap()
     }
 
     fn jsonl(session: &session::Session) -> String {
@@ -249,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_tool_call_before_results_and_feeds_them_back() {
-        let client = Arc::new(stub::StubClient::with_rounds([
+        let client = Arc::new(fake::FakeClient::with_rounds([
             vec![
                 provider::CompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
@@ -273,7 +273,7 @@ mod tests {
         session.push_user_text("hello");
         let reply = agent
             .run(
-                &provider::Model::new("stub", "test"),
+                &provider::Model::new("fake", "test"),
                 &mut session,
                 &NoEvents,
             )
@@ -307,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn reasoning_is_recorded_before_text_and_never_returned() {
         // 第一轮：思考 + 调工具；第二轮：文本。看第二轮请求里的 assistant 消息。
-        let client = Arc::new(stub::StubClient::with_rounds([
+        let client = Arc::new(fake::FakeClient::with_rounds([
             vec![
                 provider::CompletionEvent::Reasoning {
                     text: "thin".to_owned(),
@@ -339,7 +339,7 @@ mod tests {
         session.push_user_text("hi");
         let reply = agent
             .run(
-                &provider::Model::new("stub", "test"),
+                &provider::Model::new("fake", "test"),
                 &mut session,
                 &NoEvents,
             )
@@ -365,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_failure_is_a_result_not_a_transport_error() {
-        let client = Arc::new(stub::StubClient::with_rounds([
+        let client = Arc::new(fake::FakeClient::with_rounds([
             vec![
                 provider::CompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
@@ -385,7 +385,7 @@ mod tests {
         session.push_user_text("hi");
         let reply = agent
             .run(
-                &provider::Model::new("stub", "test"),
+                &provider::Model::new("fake", "test"),
                 &mut session,
                 &NoEvents,
             )
@@ -404,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn resumed_session_keeps_previous_turns_in_the_request() {
-        let client = Arc::new(stub::StubClient::with_rounds([
+        let client = Arc::new(fake::FakeClient::with_rounds([
             vec![
                 provider::CompletionEvent::Text("一".to_owned()),
                 provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
@@ -415,7 +415,7 @@ mod tests {
             ],
         ]));
         let agent = AgentLoop::new(client.clone(), tool::AgentToolRegistry::new());
-        let model = provider::Model::new("stub", "test");
+        let model = provider::Model::new("fake", "test");
 
         let mut first = session("");
         first.push_user_text("one");

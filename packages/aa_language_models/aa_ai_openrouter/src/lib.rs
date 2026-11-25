@@ -136,7 +136,9 @@ impl OpenRouterLanguageModelProvider {
     /// 把鉴权、归因与额外 header 变成 `HeaderMap`。
     ///
     /// 在进入 future 之前同步调用：非法 header 名/值直接变成错误，不 panic、不发请求。
-    fn headers(&self) -> Result<aa_http_client::http::HeaderMap, aa_language_model::provider::LlmError> {
+    fn headers(
+        &self,
+    ) -> Result<aa_http_client::http::HeaderMap, aa_language_model::provider::LlmError> {
         use aa_http_client::http::{HeaderMap, HeaderName, HeaderValue};
 
         let mut map = HeaderMap::new();
@@ -225,13 +227,13 @@ async fn send_json(
     aa_language_model::provider::LlmError,
 > {
     let mut builder = aa_http_client::Request::builder().method(method).uri(url);
-    *builder.headers_mut().expect("刚建的 builder 一定有 headers") = headers;
+    *builder
+        .headers_mut()
+        .expect("刚建的 builder 一定有 headers") = headers;
     let request = builder
         .body(aa_http_client::AsyncBody::from(body))
         .map_err(|error| {
-            aa_language_model::provider::LlmError::Transport(format!(
-                "构造 HTTP 请求失败：{error}"
-            ))
+            aa_language_model::provider::LlmError::Transport(format!("构造 HTTP 请求失败：{error}"))
         })?;
     http.send(request)
         .await
@@ -281,7 +283,8 @@ impl aa_language_model::provider::LanguageModelClient for OpenRouterLanguageMode
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         Box::pin(async move {
-            let mut resp = send_json(&http, aa_http_client::Method::POST, &url, headers, body).await?;
+            let mut resp =
+                send_json(&http, aa_http_client::Method::POST, &url, headers, body).await?;
 
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
@@ -322,9 +325,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenRouterLanguageMode
 /// 把响应体解成 `CompletionEvent` 流（`text/event-stream`）。
 ///
 /// 每读到一块就解码，不把整个 body 缓冲起来。
-fn sse_event_stream(
-    reader: aa_http_client::AsyncBody,
-) -> aa_language_model::provider::EventStream {
+fn sse_event_stream(reader: aa_http_client::AsyncBody) -> aa_language_model::provider::EventStream {
     use futures::AsyncReadExt as _;
 
     struct State {

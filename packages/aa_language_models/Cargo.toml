@@ -3,7 +3,7 @@ name = "aa_language_models"
 version = "0.1.0"
 edition = "2024"
 
-# 汇总入口：转发各 provider crate + 离线 stub。不含 IR，也不含 wire 适配。
+# 汇总入口：转发各 provider crate + 离线 fake。不含 IR，也不含 wire 适配。
 [dependencies]
 aa_ai_ollama.workspace = true
 aa_ai_openai.workspace = true
@@ -11,5 +11,5 @@ aa_ai_openrouter.workspace = true
 aa_language_model.workspace = true
 
 [features]
-# 转发 `aa_language_model/stub`，保持 `aa_language_models::stub` 这条路径。
-stub = ["aa_language_model/stub"]
+# 转发 `aa_language_model/fake`，保持 `aa_language_models::fake` 这条路径。
+fake = ["aa_language_model/fake"]

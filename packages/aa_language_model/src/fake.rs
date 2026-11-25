@@ -1,15 +1,21 @@
-//! 离线 stub provider：不连真 LLM，按剧本回固定的 `provider::CompletionEvent`。
+//! 离线 fake provider：不连真 LLM，按剧本回固定的 `provider::CompletionEvent`。
 //!
 //! 它不是 wire provider（没有任何厂商格式），只是 [`crate::provider::LanguageModelClient`]
 //! 的确定性替身，所以和 trait 放在同一个 crate：它只依赖 IR + trait，不依赖任何
-//! 厂商 DTO / HTTP。用 `stub` feature 门控，正常构建不会把测试替身带进二进制。
+//! 厂商 DTO / HTTP。用 `fake` feature 门控，正常构建不会把测试替身带进二进制。
 //!
 //! 对照 Zed：`FakeLanguageModelProvider` 放在定义 trait 的 `language_model`、
 //! 用 `test-support` feature 门控，而不是放进 `language_model_core`（纯 IR）。
 //! 本仓把 IR 和 trait 合并在 `aa_language_model`，所以替身也在这里。
 //!
-//! 用法：`aa_language_model = { path = "...", features = ["stub"] }`；
-//! 汇总 crate 通过 `aa_language_models::stub::StubClient` 转出同一个类型。
+//! 用法：`aa_language_model = { path = "...", features = ["fake"] }`；
+//! 汇总 crate 通过 `aa_language_models::fake::FakeClient` 转出同一个类型。
+//!
+//! 命名：和 Zed 对齐叫 fake（CLI 标志也是 `--fake`）。按 Meszaros 的严格分类，
+//! 这个实现更接近 scripted stub + spy——只回预置事件、记录请求，不模拟模型行为；
+//! `Fake` 在这里表达的是「对调用方可用的 provider 替身」，不是「有完整行为的
+//! in-memory provider」。如果以后加上 `expect_*` 之类的期望断言，它就变成 mock，
+//! 那时名字要跟着改。
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -23,12 +29,12 @@ use futures::stream;
 ///
 /// 多轮剧本用于测 agent loop：第一轮要先返回 `ToolUse`，第二轮才返回文本 + `Stop`。
 /// 剧本耗尽后回 `Stop(EndTurn)`（避免调用方卡在空流上）。
-pub struct StubClient {
+pub struct FakeClient {
     rounds: Mutex<VecDeque<Vec<crate::provider::CompletionEvent>>>,
     seen: Mutex<Vec<crate::request::Request>>,
 }
 
-impl StubClient {
+impl FakeClient {
     /// 单轮剧本。
     pub fn new(script: Vec<crate::provider::CompletionEvent>) -> Self {
         Self::with_rounds([script])
@@ -86,7 +92,7 @@ impl StubClient {
     }
 }
 
-impl crate::provider::LanguageModelClient for StubClient {
+impl crate::provider::LanguageModelClient for FakeClient {
     fn stream_completion(
         &self,
         _model: &crate::provider::Model,
@@ -115,7 +121,7 @@ mod tests {
     use crate::request::{Request, message};
 
     fn model() -> Model {
-        Model::new("stub", "stub")
+        Model::new("fake", "fake")
     }
 
     fn request(text: &str) -> Request {
@@ -129,7 +135,7 @@ mod tests {
         request
     }
 
-    fn collect(client: &StubClient, request: &Request) -> Vec<CompletionEvent> {
+    fn collect(client: &FakeClient, request: &Request) -> Vec<CompletionEvent> {
         block_on(async {
             client
                 .stream_completion(&model(), request)
@@ -143,7 +149,7 @@ mod tests {
 
     #[test]
     fn replays_script_and_records_requests() {
-        let client = StubClient::with_rounds([
+        let client = FakeClient::with_rounds([
             vec![
                 CompletionEvent::Text("一".to_owned()),
                 CompletionEvent::Stop(StopReason::EndTurn),
@@ -167,7 +173,7 @@ mod tests {
 
     #[test]
     fn exhausted_script_ends_the_turn() {
-        let client = StubClient::text("only");
+        let client = FakeClient::text("only");
         assert_eq!(collect(&client, &request("x")).len(), 2);
         // 剧本用完：不再回文本，直接结束这一轮，调用方不会卡在空流上。
         let events = collect(&client, &request("x"));

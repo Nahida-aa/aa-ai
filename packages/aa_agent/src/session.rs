@@ -456,7 +456,7 @@ mod tests {
     use super::*;
 
     fn header(system: &str) -> Header {
-        Header::new("stub", "test", "/tmp", system)
+        Header::new("fake", "test", "/tmp", system)
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! - `openai::OpenAiLanguageModelProvider`：OpenAI / OpenAI 兼容端点；
 //! - `openrouter::OpenRouterLanguageModelProvider`：OpenRouter（chat completions + 厂商差异）；
 //! - `ollama::OllamaLanguageModelProvider`：Ollama 原生 `/api/chat`；
-//! - `stub::StubClient`（需 `stub` feature）：离线替身，不连网络、不花 token。
+//! - `fake::FakeClient`（需 `fake` feature）：离线替身，不连网络、不花 token。
 //!
 //! canonical IR 与 `provider::LanguageModelClient` 只有一条规范路径：`aa_language_model::...`。
 //! 使用时要写完整路径，例如
@@ -14,8 +14,8 @@
 //! wire 适配依赖（`reqwest`、厂商字段）只进入对应的 provider crate；core 保持零网络
 //! 依赖，加/删 provider 不影响使用其他 provider 的人。
 //!
-//! 离线 stub 的类型本体在 `aa_language_model::stub`（和 trait 放在一起），这里只是
-//! 转发，保持 `aa_language_models::stub` 这条路径。
+//! 离线 fake 的类型本体在 `aa_language_model::fake`（和 trait 放在一起），这里只是
+//! 转发，保持 `aa_language_models::fake` 这条路径。
 
 /// OpenAI / OpenAI 兼容端点（`POST /chat/completions`，SSE）。
 pub mod openai {
@@ -35,10 +35,10 @@ pub mod ollama {
     pub use aa_ai_ollama::OllamaLanguageModelProvider;
 }
 
-/// 离线 stub provider（`aa_language_model::stub::StubClient` 的转发）。
+/// 离线 fake provider（`aa_language_model::fake::FakeClient` 的转发）。
 ///
 /// 类型本体在 core：它只依赖 IR + trait，不需要任何厂商 DTO / HTTP。
-#[cfg(feature = "stub")]
-pub mod stub {
-    pub use aa_language_model::stub::StubClient;
+#[cfg(feature = "fake")]
+pub mod fake {
+    pub use aa_language_model::fake::FakeClient;
 }

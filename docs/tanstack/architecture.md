@@ -20,7 +20,7 @@
 | `crates/agent_servers`（`AcpConnection`/`AcpV2Connection`） | **外部 agent 接入面**：ACP 连接管理（v1/v2、stdio/WS）。驱动的是完整 coding agent（agent 内部自己调 LLM + 跑工具），**不是调模型** | `ai-acp`（client 侧）+ **harness adapter**（`ai-grok-build` 等）—— 注意：这是「驱动 agent」类，**不是 provider** |
 | `crates/acp_thread`（`AcpThread` + `ToolCall`） | ACP 会话接进 agent 面板；**渲染 agent 报上来的工具调用**（`ToolCall`，`acp_thread.rs:1181`，含 `raw_input`/`raw_output`/`locations`/`authorization`） | 框架包（`ai-react`/…）+ `ai` 的工具结果消费（client 只渲染，不执行） |
 | `crates/acp_tools` | **ACP 调试日志面板**（`OpenAcpLogs` dev 动作，渲染某连接的 incoming/outgoing JSON-RPC 请求） | 无直接对应（`ai-devtools` 概念近但范围不同） |
-| `crates/language_model_core/fake_provider` | 假 LLM provider（测试用：`FakeLanguageModelProvider` + `send_text`/`end_stream`） | 手搓 mock adapter |
+| `crates/language_model/fake_provider` | 假 LLM provider（测试用：`FakeLanguageModelProvider` + `send_text`/`end_stream`） | 手搓 mock adapter |
 | （Zed 整个 app） | agent 状态、会话历史、持久化 | `ai-persistence` + `ai-memory` + `ai-compaction` |
 
 **TanStack 的 adapter 分两层（不是「两类 provider」）：**
@@ -165,7 +165,7 @@ lib (你写的, TS 实验 / Rust 生产)
 │   └── compaction：长对话压缩（可选，后期）
 └── 应用：CLI agent
     ├── --acp 启动 v2 agent（stdio NDJSON）
-    ├── LLM 层：stub（固定文本流）起步，后换真 provider
+    ├── LLM 层：fake（固定文本流）起步，后换真 provider
     └── 工具：本地直接做（读写文件/跑命令），不声明 fs/terminal client 能力
 ```
 

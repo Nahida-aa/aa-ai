@@ -87,6 +87,7 @@ docs/decisions/
 | [0012](0012-openrouter-vendor.md) | OpenRouter 独立 crate：自写 encoder/DTO、`reasoning_details` 存 `signature`、流式 `Stop` 延后、`free` 字段 | accepted（独立 crate 用户决定；映射规则助手提案） | 2026-11-21 |
 | [0013](0013-session-log.md) | 会话持久化：显式 `SessionEvent` JSONL，IR 保持零 serde；追加式、版本化、图片结果明确报错 | accepted（助手提案；用户要求先做会话而不是继续加 provider） | 2026-11-25 |
 | [0014](0014-fake-in-core.md) | 离线 fake 放 core（`fake` feature），汇总 crate 只转发；替身记录请求 | accepted（用户「现在就挪」） | 2026-11-25 |
+| [0015](0015-compaction.md) | 上下文压缩：Zed 的触发/保留 + pi 的日志化；会话格式升 v2 | accepted（用户「照搬 Zed」；持久化选 pi 式） | 2026-11-25 |
 
 ## 相关文档
 

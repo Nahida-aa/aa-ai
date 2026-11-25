@@ -16,6 +16,7 @@ use futures::StreamExt;
 use aa_language_model::provider;
 use aa_language_model::request;
 
+use crate::compaction;
 use crate::session;
 use crate::tool;
 
@@ -30,6 +31,7 @@ const MAX_TOOL_ROUNDS: usize = 25;
 pub enum AgentError {
     Llm(provider::LlmError),
     Session(session::SessionError),
+    Compaction(compaction::CompactionError),
 }
 
 impl fmt::Display for AgentError {
@@ -37,6 +39,7 @@ impl fmt::Display for AgentError {
         match self {
             Self::Llm(error) => error.fmt(formatter),
             Self::Session(error) => error.fmt(formatter),
+            Self::Compaction(error) => error.fmt(formatter),
         }
     }
 }
@@ -46,6 +49,7 @@ impl std::error::Error for AgentError {
         match self {
             Self::Llm(error) => Some(error),
             Self::Session(error) => Some(error),
+            Self::Compaction(error) => Some(error),
         }
     }
 }
@@ -62,6 +66,12 @@ impl From<session::SessionError> for AgentError {
     }
 }
 
+impl From<compaction::CompactionError> for AgentError {
+    fn from(error: compaction::CompactionError) -> Self {
+        Self::Compaction(error)
+    }
+}
+
 /// agent 循环。持有 LLM 客户端 + 工具注册表；模型和会话按调用传。
 ///
 /// 模型不在构造时钉死（对齐 pi `Agent.streamFunction(model, ...)`）：同一轮
@@ -70,6 +80,7 @@ impl From<session::SessionError> for AgentError {
 pub struct AgentLoop {
     llm: Arc<dyn provider::LanguageModelClient>,
     tools: tool::AgentToolRegistry,
+    compaction: compaction::CompactionConfig,
 }
 
 impl AgentLoop {
@@ -77,7 +88,17 @@ impl AgentLoop {
         llm: Arc<dyn provider::LanguageModelClient>,
         tools: tool::AgentToolRegistry,
     ) -> Self {
-        Self { llm, tools }
+        Self {
+            llm,
+            tools,
+            compaction: compaction::CompactionConfig::default(),
+        }
+    }
+
+    /// 替换压缩策略（默认对齐 Zed：90% 阈值、80k 最小窗口）。
+    pub fn with_compaction(mut self, config: compaction::CompactionConfig) -> Self {
+        self.compaction = config;
+        self
     }
 
     /// 在 `session` 上跑一次任务：流式回文本（通过 `events` 回调），期间自动
@@ -93,12 +114,28 @@ impl AgentLoop {
     ) -> Result<String, AgentError> {
         // 工具定义（数据半）从注册表派生，喂给 LLM。`Arc` 克隆，不深拷贝 schema。
         let tool_defs = self.tools.tool_definitions();
+
+        // 超预算时先压缩旧对话。只在「最后一条是待回复的用户文本」时动手，
+        // 避免把工具调用和结果拆开。
+        compaction::maybe_compact(
+            &*self.llm,
+            model,
+            session,
+            &tool_defs,
+            &self.compaction,
+            events,
+        )
+        .await?;
+
         let mut reply = String::new();
 
         for _ in 0..MAX_TOOL_ROUNDS {
             let request = request::Request {
+                // 压缩后 `messages()` 已经是摘要 + 保留段。
                 messages: session.messages().to_vec(),
                 tools: tool_defs.clone(),
+                // 循环按事件流消费并转发文本增量。
+                stream: true,
                 ..Default::default()
             };
 
@@ -439,5 +476,161 @@ mod tests {
             &second.messages[1].content()[0],
             message::ContentPart::Text(text) if &**text == "一"
         ));
+    }
+
+    #[tokio::test]
+    async fn compacts_over_budget_and_keeps_user_wording_beside_the_summary() {
+        let client = Arc::new(fake::FakeClient::with_handler(|_model, request| {
+            let is_compaction = request
+                .messages
+                .last()
+                .and_then(|message| message.content().first())
+                .is_some_and(|part| {
+                    matches!(
+                        part,
+                        message::ContentPart::Text(text) if text.starts_with("You are compacting")
+                    )
+                });
+            if is_compaction {
+                vec![
+                    provider::CompletionEvent::Text("## Goal\nship it".to_owned()),
+                    provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
+                ]
+            } else {
+                vec![
+                    provider::CompletionEvent::Text("ok".to_owned()),
+                    provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
+                ]
+            }
+        }));
+
+        let mut session = session("");
+        for index in 0..8 {
+            session.push_user_text(format!("question {index}"));
+            session.push_assistant(session::Turn {
+                text: "x".repeat(2_000),
+                ..session::Turn::default()
+            });
+        }
+        session.push_user_text("latest");
+
+        let model = provider::Model {
+            context_window: Some(4_000),
+            ..provider::Model::new("fake", "test")
+        };
+        let config = compaction::CompactionConfig {
+            min_context_window: 0,
+            ..Default::default()
+        };
+        let agent =
+            AgentLoop::new(client.clone(), tool::AgentToolRegistry::new()).with_compaction(config);
+        let reply = agent.run(&model, &mut session, &NoEvents).await.unwrap();
+        assert_eq!(reply, "ok");
+
+        // 生效历史 = 保留的 8 条用户原话 + 摘要 + latest + 本轮回复。
+        assert_eq!(session.message_count(), 11);
+        // 原始事件一条没删（审计）。
+        assert!(
+            session
+                .events()
+                .iter()
+                .any(|event| matches!(event, session::SessionEvent::Compaction(_)))
+        );
+        assert_eq!(session.compactions().len(), 1);
+        assert!(session.compactions()[0].summary.contains("## Goal"));
+
+        let requests = client.requests();
+        assert_eq!(requests.len(), 2);
+        // 摘要请求：旧历史 + 压缩指令，且不带工具。
+        assert!(matches!(
+            &requests[0].messages.last().unwrap().content()[0],
+            message::ContentPart::Text(text) if text.starts_with("You are compacting")
+        ));
+        assert!(requests[0].tools.is_empty());
+
+        // 正常回合：保留的用户原话 → 摘要 → 待回复的 latest。
+        let view = &requests[1].messages;
+        assert_eq!(view.len(), 10);
+        for (index, message) in view[..8].iter().enumerate() {
+            assert!(matches!(
+                &message.content()[0],
+                message::ContentPart::Text(text) if **text == format!("question {index}")
+            ));
+        }
+        assert!(matches!(
+            &view[8].content()[0],
+            message::ContentPart::Text(text) if text.contains("## Goal")
+        ));
+        assert!(matches!(
+            &view[9].content()[0],
+            message::ContentPart::Text(text) if &**text == "latest"
+        ));
+    }
+
+    #[tokio::test]
+    async fn never_compacts_between_a_tool_call_and_its_result() {
+        let client = Arc::new(fake::FakeClient::with_handler(|_model, _request| {
+            vec![
+                provider::CompletionEvent::Text("ok".to_owned()),
+                provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
+            ]
+        }));
+
+        let mut session = session("");
+        session.push_user_text("hi");
+        session.push_assistant(session::Turn {
+            text: "x".repeat(100_000),
+            tool_calls: vec![session::ToolCall {
+                id: "call_1".to_owned(),
+                name: "echo".to_owned(),
+                input: session::RecordedInput::Json(serde_json::json!({ "text": "hi" })),
+            }],
+            ..session::Turn::default()
+        });
+        session.push_tool_results(vec![session::ToolResultRecord {
+            call_id: "call_1".to_owned(),
+            content: vec!["output".to_owned()],
+            is_error: false,
+        }]);
+
+        let model = provider::Model {
+            context_window: Some(1_000),
+            ..provider::Model::new("fake", "test")
+        };
+        let config = compaction::CompactionConfig {
+            min_context_window: 0,
+            ..Default::default()
+        };
+        AgentLoop::new(client, tool::AgentToolRegistry::new())
+            .with_compaction(config)
+            .run(&model, &mut session, &NoEvents)
+            .await
+            .unwrap();
+
+        assert!(session.compactions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn small_context_is_sent_unchanged() {
+        let client = Arc::new(fake::FakeClient::with_rounds([vec![
+            provider::CompletionEvent::Text("ok".to_owned()),
+            provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
+        ]]));
+        let mut session = session("");
+        session.push_user_text("hi");
+
+        let model = provider::Model {
+            context_window: Some(100_000),
+            ..provider::Model::new("fake", "test")
+        };
+        AgentLoop::new(client.clone(), tool::AgentToolRegistry::new())
+            .run(&model, &mut session, &NoEvents)
+            .await
+            .unwrap();
+
+        assert!(session.compactions().is_empty());
+        let requests = client.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].messages.len(), 1);
     }
 }

@@ -99,3 +99,9 @@ format 串是版本化的：`anthropic.messages.encrypted-content.v1`、`openai.
 
 - 若 `redacted_thinking` 的 `data` 实际是二进制而非 base64 文本 → 改成 `Arc<[u8]>`。
 - 若要做压缩 → 先实现 segment 层（新 ADR），**不要**在 `ContentPart` 上加变体。
+
+## 附录（2026-11-25）
+
+压缩已按 [0015](0015-compaction.md) 落地：`SessionEvent::Compaction` 存摘要 +
+保留段边界，内存里的生效历史在压缩时原地替换。`Segment::{Messages, Compaction}`
+没有作为独立类型引入；原生压缩（`ProviderNative`）仍未实现。

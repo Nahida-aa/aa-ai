@@ -261,3 +261,11 @@ pub struct Request {
 - [ ] `Vec<Arc<Vec<Arc<Message>>>>`（O(1) 历史快照）的追加成本 vs 收益。
 - [ ] 小字符串内联对短消息密集负载的影响。
 - [ ] `Message` 的 serde 表示与版本迁移（持久化前置）。
+
+## 附录（2026-11-25）
+
+D7 的 `Segment` 在 v0 没有作为独立类型落地。压缩（[0015](0015-compaction.md)）
+采用了更小的形状：`Session` 只保留**生效历史** `Vec<Arc<Message>>`，压缩事件
+到达时用「保留的用户消息 + 摘要 + 保留段」原地替换，被覆盖的 `Arc` 直接 drop；
+完整审计在 `Session::events`。等需要「同一会话里保留多个可切换分支」时再引入
+`Segment`——现在没有第二个消费者。

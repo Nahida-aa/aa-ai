@@ -19,7 +19,15 @@ use aa_language_model::request::message::{ContentPart, Message, Role, ToolInput,
 use serde::{Deserialize, Serialize};
 
 /// 磁盘格式版本。改事件形状时必须递增，并在 [`Session::from_events`] 里明确拒绝旧版本。
-pub const VERSION: u32 = 1;
+///
+/// v2：增加 [`SessionEvent::Compaction`]。
+pub const VERSION: u32 = 2;
+
+/// 压缩时从旧历史里原样保留的用户文本预算（字节）。
+///
+/// 对齐 Zed 的 `COMPACTION_RETAINED_USER_MESSAGES_BYTE_BUDGET`（约 20k token）：
+/// 摘要之外再留一批最近的用户消息，避免摘要丢掉用户的原话。
+pub const RETAINED_USER_BYTES: usize = 80_000;
 
 /// 会话日志的一行。
 ///
@@ -36,6 +44,28 @@ pub enum SessionEvent {
     Assistant(Turn),
     /// 一条工具结果。同一次模型调用产生的多条结果在恢复时会合并成一条 user 消息。
     ToolResult(ToolResultRecord),
+    /// 旧对话已被摘要替代。原始事件仍保留在日志里（审计 / 导出），
+    /// 但内存里的生效历史只保留摘要与保留段。
+    Compaction(CompactionRecord),
+}
+
+/// 一次压缩的事实。
+///
+/// 存的是「重放需要什么」，不是压缩算法的全部细节：
+/// - `summary`：模型生成的摘要原文；
+/// - `retained_users`：压缩时挑出来原样保留的用户文本（按时间顺序）；
+/// - `first_kept_message`：摘要之后第一条保留消息在**压缩时生效历史**里的下标
+///   （含 system 那条）；
+/// - `tokens_before`：压缩前的估算值，只用于展示和调参。
+///
+/// 原始事件不会被删除：日志仍是完整审计记录，压缩只替换内存里的生效历史。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactionRecord {
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained_users: Vec<String>,
+    pub first_kept_message: usize,
+    pub tokens_before: u64,
 }
 
 /// 会话头。
@@ -55,7 +85,7 @@ pub struct Header {
 }
 
 impl Header {
-    /// 用当前时间构造一个 v1 会话头。
+    /// 用当前时间构造一个当前版本（v2）的会话头。
     pub fn new(
         provider: impl Into<String>,
         model: impl Into<String>,
@@ -149,7 +179,7 @@ impl RecordedInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultRecord {
     pub call_id: String,
-    /// v1 只记录文本段。图片结果没有稳定编码，构造时明确报错，不静默丢内容。
+    /// 日志只记录文本段。图片结果没有稳定编码，构造时明确报错，不静默丢内容。
     pub content: Vec<String>,
     pub is_error: bool,
 }
@@ -191,6 +221,11 @@ pub struct Session {
     header: Header,
     events: Vec<SessionEvent>,
     messages: Vec<Arc<Message>>,
+    /// 日志里出现过的压缩记录。生效历史只看最后一条。
+    compactions: Vec<CompactionRecord>,
+    /// 摘要消息在 `messages` 里的下标。摘要也是 user 消息（provider 无关），
+    /// 保留用户原话时要把它排除掉。
+    summary_message: Option<usize>,
 }
 
 impl Session {
@@ -208,6 +243,8 @@ impl Session {
             events: vec![SessionEvent::Header(header.clone())],
             header,
             messages,
+            compactions: Vec::new(),
+            summary_message: None,
         })
     }
 
@@ -230,6 +267,8 @@ impl Session {
         let mut messages = Vec::new();
         push_system(&mut messages, &header.system);
         let mut pending_results: Vec<ContentPart> = Vec::new();
+        let mut compactions = Vec::new();
+        let mut summary_message = None;
 
         for event in &events[1..] {
             match event {
@@ -250,6 +289,11 @@ impl Session {
                 SessionEvent::ToolResult(record) => {
                     pending_results.push(tool_result_part(record));
                 }
+                // 压缩：替换生效历史，但原始事件保留（审计）。
+                SessionEvent::Compaction(record) => {
+                    compactions.push(record.clone());
+                    summary_message = apply_compaction(&mut messages, record);
+                }
             }
         }
         flush_results(&mut messages, &mut pending_results);
@@ -258,6 +302,8 @@ impl Session {
             header,
             events,
             messages,
+            compactions,
+            summary_message,
         })
     }
 
@@ -323,9 +369,31 @@ impl Session {
         &self.header.system
     }
 
-    /// 已还原的历史（`Arc` 克隆，不复制内容）。
+    /// 当前生效的历史（`Arc` 克隆，不复制内容）。
+    ///
+    /// 压缩之后这里**只剩摘要 + 保留段**；被摘要掉的原始消息不再常驻内存
+    /// （审计全文仍在 [`Session::events`] 里）。发给模型的就是它。
     pub fn messages(&self) -> &[Arc<Message>] {
         &self.messages
+    }
+
+    /// 日志里出现过的压缩记录（按出现顺序）。
+    pub fn compactions(&self) -> &[CompactionRecord] {
+        &self.compactions
+    }
+
+    /// 摘要消息在生效历史里的下标（没有压缩时为 `None`）。
+    pub fn summary_message(&self) -> Option<usize> {
+        self.summary_message
+    }
+
+    /// 记录一次压缩，并把生效历史替换成「保留的用户消息 → 摘要 → 保留段」。
+    ///
+    /// 原始事件不删除：日志仍是完整审计记录。
+    pub fn push_compaction(&mut self, record: CompactionRecord) {
+        self.events.push(SessionEvent::Compaction(record.clone()));
+        self.compactions.push(record.clone());
+        self.summary_message = apply_compaction(&mut self.messages, &record);
     }
 
     /// 完整事件日志（第 0 条是 header）。应用按这个顺序追加到文件。
@@ -371,6 +439,102 @@ fn push_system(messages: &mut Vec<Arc<Message>>, system: &str) {
             vec![ContentPart::text(system)],
         )));
     }
+}
+
+/// 把生效历史替换成 `system → 保留的用户消息 → 摘要 → 压缩点之后的消息`。
+///
+/// `first_kept_message` 是压缩时生效历史里的下标；被覆盖的 `Arc<Message>`
+/// 在这里直接 drop（0004 D7 的目标）。返回摘要消息的新下标。
+fn apply_compaction(messages: &mut Vec<Arc<Message>>, record: &CompactionRecord) -> Option<usize> {
+    let first_kept = record.first_kept_message.min(messages.len());
+    let kept = messages.split_off(first_kept);
+    let system = messages
+        .first()
+        .filter(|message| message.role == Role::System)
+        .cloned();
+    messages.clear();
+    if let Some(system) = system {
+        messages.push(system);
+    }
+    for text in &record.retained_users {
+        messages.push(Arc::new(Message::new(
+            Role::User,
+            vec![ContentPart::text(text.as_str())],
+        )));
+    }
+    let summary_index = messages.len();
+    messages.push(Arc::new(Message::new(
+        Role::User,
+        vec![ContentPart::text(format!(
+            "The previous conversation was compacted. Use this summary as context:\n\n{}",
+            record.summary
+        ))],
+    )));
+    messages.extend(kept);
+    Some(summary_index)
+}
+
+/// 从 `messages[..before]` 里挑出最近的用户文本，总量不超过 [`RETAINED_USER_BYTES`]。
+///
+/// 只挑「纯用户输入」：带工具结果的消息不算（它属于模型回合，不是用户原话）；
+/// `skip` 用来排除上一条压缩摘要（它也是 user 消息，但不是用户说的话）。
+/// 放不下的那条按字节截断（保证落在 UTF-8 字符边界上），对齐 Zed 的
+/// `truncate_user_message_to_byte_budget`。
+pub fn retained_user_texts(
+    messages: &[Arc<Message>],
+    before: usize,
+    skip: Option<usize>,
+) -> Vec<String> {
+    let mut remaining = RETAINED_USER_BYTES;
+    let mut retained: Vec<String> = Vec::new();
+
+    for (index, message) in messages[..before.min(messages.len())]
+        .iter()
+        .enumerate()
+        .rev()
+    {
+        if Some(index) == skip {
+            continue;
+        }
+        let Some(text) = user_text(message) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        if text.len() <= remaining {
+            remaining -= text.len();
+            retained.push(text.to_owned());
+        } else {
+            if remaining > 0 {
+                let mut end = remaining;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                retained.push(text[..end].to_owned());
+            }
+            break;
+        }
+    }
+
+    retained.reverse();
+    retained
+}
+
+/// 纯用户文本：角色是 user、有文本、且不是工具结果。
+pub(crate) fn user_text(message: &Message) -> Option<&str> {
+    if message.role != Role::User {
+        return None;
+    }
+    let mut text = None;
+    for part in &message.content {
+        match part {
+            ContentPart::Text(value) if text.is_none() => text = Some(&**value),
+            ContentPart::ToolResult { .. } => return None,
+            _ => {}
+        }
+    }
+    text
 }
 
 fn flush_results(messages: &mut Vec<Arc<Message>>, pending: &mut Vec<ContentPart>) {
@@ -425,7 +589,7 @@ pub enum SessionError {
     Json { line: usize, message: String },
     /// 序列化失败（理论上不会发生）。
     Encode(String),
-    /// 该内容无法写进 v1 日志（目前只有工具结果里的图片）。
+    /// 该内容无法写进会话日志（目前只有工具结果里的图片）。
     UnsupportedContent(&'static str),
 }
 
@@ -443,7 +607,7 @@ impl fmt::Display for SessionError {
             }
             Self::Encode(message) => write!(formatter, "会话事件序列化失败：{message}"),
             Self::UnsupportedContent(what) => {
-                write!(formatter, "会话日志 v1 无法记录：{what}")
+                write!(formatter, "会话日志无法记录：{what}")
             }
         }
     }
@@ -612,5 +776,109 @@ mod tests {
         }));
         let error = ToolResultRecord::from_parts("a", &[image], false).unwrap_err();
         assert_eq!(error, SessionError::UnsupportedContent("tool result image"));
+    }
+
+    #[test]
+    fn compaction_replaces_the_live_history_but_not_the_log() {
+        let mut session = Session::new(header("sys")).unwrap();
+        session.push_user_text("first");
+        session.push_assistant(Turn {
+            text: "a1".to_owned(),
+            ..Turn::default()
+        });
+        session.push_user_text("second");
+
+        let first_kept_message = session.message_count() - 1;
+        session.push_compaction(CompactionRecord {
+            summary: "summary".to_owned(),
+            retained_users: vec!["first".to_owned()],
+            first_kept_message,
+            tokens_before: 123,
+        });
+
+        // 生效历史被替换；完整审计仍在 events 里。
+        assert_eq!(session.message_count(), 4);
+        assert_eq!(session.compactions().len(), 1);
+
+        let view = session.messages();
+        // system → 保留的用户消息 → 摘要 → 压缩点之后的待回复消息。
+        assert_eq!(view.len(), 4);
+        assert_eq!(view[0].role(), Role::System);
+        assert!(matches!(
+            &view[1].content()[0],
+            ContentPart::Text(text) if &**text == "first"
+        ));
+        assert!(matches!(
+            &view[2].content()[0],
+            ContentPart::Text(text)
+                if text.contains("The previous conversation was compacted")
+                    && text.contains("summary")
+        ));
+        assert!(matches!(
+            &view[3].content()[0],
+            ContentPart::Text(text) if &**text == "second"
+        ));
+
+        // 重放后生效历史一致，原始事件一条不少。
+        let jsonl = session
+            .events()
+            .iter()
+            .map(|event| event.to_json_line().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let restored = Session::from_jsonl(&jsonl).unwrap();
+        assert_eq!(restored.message_count(), 4);
+        assert_eq!(restored.compactions(), session.compactions());
+        assert_eq!(restored.messages(), session.messages());
+    }
+
+    #[test]
+    fn retained_user_texts_respect_the_byte_budget() {
+        let mut session = Session::new(header("")).unwrap();
+        session.push_user_text("old");
+        session.push_assistant(Turn {
+            text: "a".to_owned(),
+            ..Turn::default()
+        });
+        session.push_tool_results(vec![ToolResultRecord {
+            call_id: "c".to_owned(),
+            content: vec!["tool output".to_owned()],
+            is_error: false,
+        }]);
+        session.push_user_text("new");
+
+        // 工具结果不是「用户原话」，不参与保留。
+        let retained = retained_user_texts(session.messages(), session.message_count(), None);
+        assert_eq!(retained, vec!["old".to_owned(), "new".to_owned()]);
+    }
+
+    #[test]
+    fn the_previous_summary_is_not_retained_as_user_wording() {
+        let mut session = Session::new(header("")).unwrap();
+        session.push_user_text("first");
+        session.push_assistant(Turn {
+            text: "a1".to_owned(),
+            ..Turn::default()
+        });
+        session.push_user_text("second");
+        session.push_compaction(CompactionRecord {
+            summary: "summary one".to_owned(),
+            retained_users: vec!["first".to_owned()],
+            first_kept_message: 2,
+            tokens_before: 100,
+        });
+
+        session.push_assistant(Turn {
+            text: "a2".to_owned(),
+            ..Turn::default()
+        });
+        session.push_user_text("third");
+
+        let retained = retained_user_texts(
+            session.messages(),
+            session.message_count() - 1,
+            session.summary_message(),
+        );
+        assert_eq!(retained, vec!["first".to_owned(), "second".to_owned()]);
     }
 }

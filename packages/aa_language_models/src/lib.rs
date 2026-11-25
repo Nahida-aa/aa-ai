@@ -4,7 +4,9 @@
 //! - `openai::OpenAiLanguageModelProvider`：OpenAI / OpenAI 兼容端点；
 //! - `openrouter::OpenRouterLanguageModelProvider`：OpenRouter（chat completions + 厂商差异）；
 //! - `ollama::OllamaLanguageModelProvider`：Ollama 原生 `/api/chat`；
-//! - `fake::FakeClient`（需 `fake` feature）：离线替身，不连网络、不花 token。
+//! - `fake::FakeClient`（需 `fake` feature）：离线替身，不连网络、不花 token；
+//! - `mock_server::MockServer`（需 `mock-server` feature）：真 socket 的 mock 端点，
+//!   按厂商 wire 协议应答，用真实 HTTP 链路做离线验证。
 //!
 //! canonical IR 与 `provider::LanguageModelClient` 只有一条规范路径：`aa_language_model::...`。
 //! 使用时要写完整路径，例如
@@ -42,3 +44,10 @@ pub mod ollama {
 pub mod fake {
     pub use aa_language_model::fake::FakeClient;
 }
+
+/// 真 socket 的 mock 端点（`mock-server` feature）。
+///
+/// 绑 `127.0.0.1:0`，按选定厂商的 wire 协议应答；用于离线跑真实的
+/// settings → reqwest → provider → agent loop 链路。
+#[cfg(feature = "mock-server")]
+pub mod mock_server;

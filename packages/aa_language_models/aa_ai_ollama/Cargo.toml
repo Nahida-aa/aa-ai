@@ -15,3 +15,7 @@ serde_json.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 aa_reqwest_client.workspace = true
+
+[features]
+# 只在测试 / mock server 里启用：wire body 生成器。
+test-support = []

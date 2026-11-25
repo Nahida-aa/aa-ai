@@ -9,7 +9,26 @@ aa_ai_ollama.workspace = true
 aa_ai_openai.workspace = true
 aa_ai_openrouter.workspace = true
 aa_language_model.workspace = true
+serde_json = { workspace = true, optional = true }
 
 [features]
 # 转发 `aa_language_model/fake`，保持 `aa_language_models::fake` 这条路径。
 fake = ["aa_language_model/fake"]
+# 真 socket 的 mock 端点（测试 / 离线 CLI 用）。顺带打开各 provider 的
+# wire body 生成器；生产构建不要开。
+mock-server = [
+    "dep:serde_json",
+    "aa_ai_openai/test-support",
+    "aa_ai_openrouter/test-support",
+    "aa_ai_ollama/test-support",
+]
+
+[dev-dependencies]
+tokio.workspace = true
+futures.workspace = true
+aa_http_client.workspace = true
+aa_reqwest_client.workspace = true
+
+[[example]]
+name = "mock_endpoint"
+required-features = ["mock-server"]

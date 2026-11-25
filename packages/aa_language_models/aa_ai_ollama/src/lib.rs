@@ -37,6 +37,10 @@
 pub mod chat;
 pub mod models;
 
+/// 测试支持：把 canonical 事件编成该厂商的 wire body（`test-support` feature）。
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;

@@ -92,7 +92,12 @@ dependencies = [
  "aa_ai_ollama",
  "aa_ai_openai",
  "aa_ai_openrouter",
+ "aa_http_client",
  "aa_language_model",
+ "aa_reqwest_client",
+ "futures",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

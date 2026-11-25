@@ -20,3 +20,6 @@ aa_http_client = { workspace = true, features = ["test-support"] }
 # 构造真实客户端（builder 在实现层）。
 aa_reqwest_client.workspace = true
 
+[features]
+# 只在测试 / mock server 里启用：wire body 生成器。
+test-support = []

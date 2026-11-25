@@ -88,6 +88,7 @@ docs/decisions/
 | [0013](0013-session-log.md) | 会话持久化：显式 `SessionEvent` JSONL，IR 保持零 serde；追加式、版本化、图片结果明确报错 | accepted（助手提案；用户要求先做会话而不是继续加 provider） | 2026-11-25 |
 | [0014](0014-fake-in-core.md) | 离线 fake 放 core（`fake` feature），汇总 crate 只转发；替身记录请求 | accepted（用户「现在就挪」） | 2026-11-25 |
 | [0015](0015-compaction.md) | 上下文压缩：Zed 的触发/保留 + pi 的日志化；会话格式升 v2 | accepted（用户「照搬 Zed」；持久化选 pi 式） | 2026-11-25 |
+| [0016](0016-wire-mock-server.md) | wire 级 mock：生成器跟 provider（`test-support`），服务器放汇总 crate（`mock-server`） | accepted（用户「库提供东西简化起 mock 服务器」） | 2026-11-25 |
 
 ## 相关文档
 

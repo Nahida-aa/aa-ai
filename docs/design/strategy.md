@@ -24,10 +24,11 @@ packages/
   aa_language_model/                  IR + trait，零网络依赖
     request/    request::Request / request::message::* / request::tools::*
     provider/   provider::LanguageModelClient / LlmError / CompletionEvent
+    stub.rs     离线替身（stub feature）
   aa_language_models/
     aa_ai_openai/       OpenAI wire DTO + encoder + HTTP 客户端（依赖 reqwest）
     aa_ai_anthropic/    待建
-    src/                汇总入口（openai::OpenAiLanguageModelProvider、stub::StubClient）
+    src/                汇总入口（openai::OpenAiLanguageModelProvider 等；stub 转发 core）
   aa_agent/
     agent_loop.rs       agent loop（消费 provider::LanguageModelClient + tool::AgentTool）
 ```
@@ -44,7 +45,7 @@ packages/
 ```
 顺序（被依赖的先写，写一点就能往下走）：
 1. aa_language_model: request（IR）+ provider（LanguageModelClient trait）
-2. aa_language_models: aa_ai_openai（第一家 wire 适配）+ stub（离线）
+2. aa_language_models: aa_ai_openai（第一家 wire 适配）；aa_language_model 的 stub feature（离线）
 3. aa_agent: agent_loop（消费 provider::LanguageModelClient + tool::AgentTool）
 4. aacode cli: 接线 + 写 2-3 个工具（read/write/edit）impl tool::AgentTool
 5. 跑通：stub LLM 调 read 工具（离线）→ OpenAI 真调（在线）

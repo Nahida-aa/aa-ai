@@ -23,7 +23,7 @@
 
 | crate | 路径 | 职责 | 依赖 |
 |---|---|---|---|
-| `aa_language_model` | `packages/aa_language_model/` | canonical IR（`request::*`）+ `provider::LanguageModelClient` trait / 错误 / 事件 / `Model` | 无网络依赖 |
+| `aa_language_model` | `packages/aa_language_model/` | canonical IR（`request::*`）+ `provider::LanguageModelClient` trait / 错误 / 事件 / `Model`；`stub` feature 下带离线替身 `stub::StubClient` | 无网络依赖 |
 | `aa_http_client` | `aa-stack/packages/util/aa_http_client/`（**库外**） | 共享 HTTP 传输：一个进程一个连接池；代理 / 超时 / keep-alive / 错误文案 | `reqwest`（不认识 LLM 类型） |
 | `aa_ai_openai` | `packages/aa_language_models/aa_ai_openai/` | OpenAI Chat Completions（`/chat/completions`，SSE）的 wire DTO + encoder + 发请求 | core + `aa_http_client` |
 | `aa_ai_ollama` | `packages/aa_language_models/aa_ai_ollama/` | Ollama 原生（`/api/chat`，NDJSON）：`thinking`、对象形态的 `arguments`、`tool_name` 关联 | core + `aa_http_client` |
@@ -31,7 +31,7 @@
 | `aa_ai_openrouter` | `packages/aa_language_models/aa_ai_openrouter/` | 常见厂商：OpenAI 形状 + `reasoning` / `reasoning_details` 回放、数字错误码、`pricing` | core + `aa_http_client` |
 | `aa_ai_anthropic`（待建） | `packages/aa_language_models/aa_ai_anthropic/` | 另一套协议（Messages + 签名 thinking） | core + `aa_http_client` |
 | `aa_ai_gemini`（待建） | 同上 | `generateContent` | 同上 |
-| `aa_language_models` | `packages/aa_language_models/` | provider 汇总入口 + 离线 `stub::StubClient` | 各 `aa_ai_*` + core |
+| `aa_language_models` | `packages/aa_language_models/` | provider 汇总入口（`stub` feature 转发 core 的离线替身） | 各 `aa_ai_*` + core |
 | `aa_agent` | `packages/aa_agent/` | agent loop + 工具执行接口 + 会话日志（格式在库，路径在应用） | core |
 
 > `aa_http_client` 放在 `aa-stack` 而不是本仓：它和 LLM 无关，是通用基础设施
@@ -69,12 +69,16 @@ aa_agent ──> aa_language_model
   收一个 `Arc<aa_http_client::HttpClient>` 并调 `http.reqwest()` 发请求。provider
   crate 仍然依赖 `reqwest`（要用 `HeaderMap` / `reqwest::Error` / `bytes_stream()`），
   但没有任何构造客户端的代码。
-- `aa_language_models` 只做**命名空间转发**（`openai::OpenAiLanguageModelProvider`、
-  `stub::StubClient`），不摊平 IR 类型：`request::Request` 只有
+- `aa_language_models` 只做**命名空间转发**（`openai::OpenAiLanguageModelProvider` 等），
+  不摊平 IR 类型：`request::Request` 只有
   `aa_language_model::request::Request` 一条规范路径。
-- 离线 stub 放在汇总 crate（不是 core、也不是 `aa_ai_*`）：和 Zed 把
-  `FakeLanguageModelProvider` 放在 `language_model` 而不是 `language_model_core`
-  是同一个理由——它不是 wire provider，没有任何厂商格式。
+- 离线 stub（`stub::StubClient`）放在 **core**、用 `stub` feature 门控：它只依赖
+  IR + trait，不是 wire provider，也没有任何厂商格式。放汇总 crate 会让只想用替身的
+  测试方（如 `aa_agent`）为了一个假客户端拉进全部 `aa_ai_*`（reqwest + TLS）——
+  这正是它之前被复制成两份的原因。汇总 crate 通过 `aa_language_models/stub`
+  转发同一类型，路径不变。
+  对照 Zed：`FakeLanguageModelProvider` 在定义 trait 的 `language_model`、
+  用 `test-support` feature 门控，而不是放进纯 IR 的 `language_model_core`。
 
 ### 2.1 provider 代码必须放哪
 

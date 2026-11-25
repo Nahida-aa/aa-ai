@@ -9,5 +9,7 @@ aa_ai_ollama.workspace = true
 aa_ai_openai.workspace = true
 aa_ai_openrouter.workspace = true
 aa_language_model.workspace = true
-futures.workspace = true
-serde_json.workspace = true
+
+[features]
+# 转发 `aa_language_model/stub`，保持 `aa_language_models::stub` 这条路径。
+stub = ["aa_language_model/stub"]

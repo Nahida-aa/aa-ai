@@ -90,8 +90,6 @@ dependencies = [
  "aa_ai_openai",
  "aa_ai_openrouter",
  "aa_language_model",
- "futures",
- "serde_json",
 ]
 
 [[package]]

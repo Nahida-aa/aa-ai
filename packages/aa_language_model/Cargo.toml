@@ -10,3 +10,8 @@ futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[features]
+# 离线 stub provider（`stub::StubClient`）。默认关闭：生产构建不需要测试替身。
+# 汇总 crate 的 `stub` feature 会转发到这里。
+stub = []

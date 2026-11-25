@@ -199,49 +199,10 @@ impl AgentLoop {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::Mutex;
-
-    use futures::stream;
-
     use aa_language_model::request::message;
+    use aa_language_model::stub;
 
     use super::*;
-
-    /// 按轮返回剧本，并记录每次请求（用于断言历史回填顺序）。
-    struct ScriptedClient {
-        rounds: Mutex<VecDeque<Vec<provider::CompletionEvent>>>,
-        seen: Mutex<Vec<request::Request>>,
-    }
-
-    impl ScriptedClient {
-        fn new(rounds: impl IntoIterator<Item = Vec<provider::CompletionEvent>>) -> Self {
-            Self {
-                rounds: Mutex::new(rounds.into_iter().collect()),
-                seen: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl provider::LanguageModelClient for ScriptedClient {
-        fn stream_completion(
-            &self,
-            _model: &provider::Model,
-            request: &request::Request,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<provider::EventStream, provider::LlmError>>
-                    + Send
-                    + 'static,
-            >,
-        > {
-            self.seen.lock().unwrap().push(request.clone());
-            let events = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
-            Box::pin(async move { Ok(stream::iter(events.into_iter().map(Ok)).boxed()) })
-        }
-    }
 
     #[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
     struct EchoInput {
@@ -288,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn records_tool_call_before_results_and_feeds_them_back() {
-        let client = Arc::new(ScriptedClient::new([
+        let client = Arc::new(stub::StubClient::with_rounds([
             vec![
                 provider::CompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
@@ -320,7 +281,7 @@ mod tests {
             .unwrap();
         assert_eq!(reply, "done");
 
-        let seen = client.seen.lock().unwrap();
+        let seen = client.requests();
         assert_eq!(seen.len(), 2);
 
         // 第二轮请求的历史必须是：system → user → assistant(tool_call) → tool(result)。
@@ -346,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn reasoning_is_recorded_before_text_and_never_returned() {
         // 第一轮：思考 + 调工具；第二轮：文本。看第二轮请求里的 assistant 消息。
-        let client = Arc::new(ScriptedClient::new([
+        let client = Arc::new(stub::StubClient::with_rounds([
             vec![
                 provider::CompletionEvent::Reasoning {
                     text: "thin".to_owned(),
@@ -387,7 +348,7 @@ mod tests {
         // 思考不进入返回文本。
         assert_eq!(reply, "done");
 
-        let seen = client.seen.lock().unwrap();
+        let seen = client.requests();
         let assistant = &seen[1].messages[1];
         assert_eq!(assistant.role(), message::Role::Assistant);
         // 思考在最前，且多段增量拼成一条、签名保留。
@@ -404,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_failure_is_a_result_not_a_transport_error() {
-        let client = Arc::new(ScriptedClient::new([
+        let client = Arc::new(stub::StubClient::with_rounds([
             vec![
                 provider::CompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
@@ -432,7 +393,7 @@ mod tests {
             .unwrap();
         assert_eq!(reply, "recovered");
 
-        let seen = client.seen.lock().unwrap();
+        let seen = client.requests();
         let tool_msg = &seen[1].messages[2];
         assert_eq!(tool_msg.role(), message::Role::User);
         assert!(matches!(
@@ -443,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn resumed_session_keeps_previous_turns_in_the_request() {
-        let client = Arc::new(ScriptedClient::new([
+        let client = Arc::new(stub::StubClient::with_rounds([
             vec![
                 provider::CompletionEvent::Text("一".to_owned()),
                 provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
@@ -467,7 +428,7 @@ mod tests {
         restored.push_user_text("two");
         agent.run(&model, &mut restored, &NoEvents).await.unwrap();
 
-        let seen = client.seen.lock().unwrap();
+        let seen = client.requests();
         let second = seen.last().unwrap();
         // user(one) → assistant(一) → user(two)：上一轮的文本确实回放了。
         assert_eq!(second.messages.len(), 3);

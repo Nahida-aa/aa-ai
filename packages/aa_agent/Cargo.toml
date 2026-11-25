@@ -10,3 +10,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# 离线替身：`stub::StubClient` 用 feature 门控在 core 里，测试才需要。
+aa_language_model = { workspace = true, features = ["stub"] }

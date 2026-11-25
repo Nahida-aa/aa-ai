@@ -1,8 +1,12 @@
 //! `aa_language_model` — canonical IR + provider 通信接口。
 //!
-//! 这个 crate **只有**两样东西：
+//! 这个 crate 默认只有两样东西：
 //! - `request`：canonical IR（`request::Request`、`request::message::*`、`request::tools::*`）；
 //! - `provider`：`provider::LanguageModelClient` trait + 错误 + 事件类型。
+//!
+//! 打开 `stub` feature 后多一个 [`stub::StubClient`]：离线剧本驱动的确定性替身。
+//! 它和 trait 放在同一 crate，是因为只依赖 IR + trait、不依赖任何厂商格式；
+//! 用 feature 门控，正常构建不会带上测试替身。
 //!
 //! 不含任何厂商的 wire 格式，也**不依赖 `reqwest`**。加一家 provider = 新增一个
 //! `aa_ai_<provider>` crate，不动这里。布局与命名规则见
@@ -22,3 +26,7 @@
 
 pub mod provider;
 pub mod request;
+
+/// 离线 stub provider（剧本驱动，不连网）。默认关闭，见 Cargo.toml 的 `stub` feature。
+#[cfg(any(test, feature = "stub"))]
+pub mod stub;

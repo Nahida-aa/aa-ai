@@ -1,25 +1,68 @@
-//! `AgentLoop`：v0 最简带工具的 agent 循环。
+//! `AgentLoop`：带工具的 agent 循环。
 //!
-//! 一次调用 = 一个任务：喂 `provider::LanguageModelClient` 一个 `request::Request`，循环「LLM 要调工具 →
-//! 执行 → 回填 → 再喂 LLM」直到 LLM 不再调工具。
+//! 一次调用 = 在会话上跑一轮任务：喂 `provider::LanguageModelClient` 一个
+//! `request::Request`，循环「LLM 要调工具 → 执行 → 回填 → 再喂 LLM」直到 LLM
+//! 不再调工具。历史存在 [`session::Session`] 里，调用方可以先 `push_user_text`
+//! 再 `run`，也可以从磁盘恢复会话后继续。
 //!
 //! 历史是 `Vec<Arc<message::Message>>`（见 `docs/decisions/0004-message-layout.md` D7）：
 //! 每轮请求只克隆指针（8 B/条），不复制消息内容。
 
+use std::fmt;
 use std::sync::Arc;
 
 use futures::StreamExt;
 
 use aa_language_model::provider;
 use aa_language_model::request;
-use aa_language_model::request::message;
 
+use crate::session;
 use crate::tool;
 
 /// 循环里 LLM 最多连续调工具的轮数（防 LLM 死循环调工具）。
 const MAX_TOOL_ROUNDS: usize = 25;
 
-/// agent 循环。持有 LLM 客户端 + 工具注册表；模型按调用传。
+/// agent 循环的错误。
+///
+/// 分成两类：LLM 侧（网络 / provider 拒绝）和会话侧（内容无法写进日志）。
+/// 工具执行失败**不在这里**：它是给模型看的结果，不是循环的失败。
+#[derive(Debug)]
+pub enum AgentError {
+    Llm(provider::LlmError),
+    Session(session::SessionError),
+}
+
+impl fmt::Display for AgentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Llm(error) => error.fmt(formatter),
+            Self::Session(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AgentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Llm(error) => Some(error),
+            Self::Session(error) => Some(error),
+        }
+    }
+}
+
+impl From<provider::LlmError> for AgentError {
+    fn from(error: provider::LlmError) -> Self {
+        Self::Llm(error)
+    }
+}
+
+impl From<session::SessionError> for AgentError {
+    fn from(error: session::SessionError) -> Self {
+        Self::Session(error)
+    }
+}
+
+/// agent 循环。持有 LLM 客户端 + 工具注册表；模型和会话按调用传。
 ///
 /// 模型不在构造时钉死（对齐 pi `Agent.streamFunction(model, ...)`）：同一轮
 /// 会话里可以按需换模型（便宜的模型跑工具轮、贵的模型出最终答案；失败降级），
@@ -37,37 +80,24 @@ impl AgentLoop {
         Self { llm, tools }
     }
 
-    /// 跑一次任务：输入模型 + 消息 + 系统提示，流式回文本（通过 `events` 回调），
-    /// 期间自动执行 LLM 要求的工具，直到 LLM 收敛。
+    /// 在 `session` 上跑一次任务：流式回文本（通过 `events` 回调），期间自动
+    /// 执行 LLM 要求的工具，直到 LLM 收敛。返回累积的文本回复（不含工具中间结果）。
     ///
-    /// 返回累积的文本回复（不含工具中间结果）。工具执行进度通过 `events` 上报。
+    /// 调用方负责把用户输入先写进会话（`session.push_user_text`）。本函数只追加
+    /// 模型输出与工具结果，所以恢复会话后可以直接继续跑。
     pub async fn run(
         &self,
         model: &provider::Model,
-        system: &str,
-        user: &str,
+        session: &mut session::Session,
         events: &impl tool::ToolEvents,
-    ) -> Result<String, provider::LlmError> {
+    ) -> Result<String, AgentError> {
         // 工具定义（数据半）从注册表派生，喂给 LLM。`Arc` 克隆，不深拷贝 schema。
         let tool_defs = self.tools.tool_definitions();
-
-        let mut history: Vec<Arc<message::Message>> = Vec::new();
-        if !system.is_empty() {
-            history.push(Arc::new(message::Message::new(
-                message::Role::System,
-                vec![message::ContentPart::text(system)],
-            )));
-        }
-        history.push(Arc::new(message::Message::new(
-            message::Role::User,
-            vec![message::ContentPart::text(user)],
-        )));
-
         let mut reply = String::new();
 
         for _ in 0..MAX_TOOL_ROUNDS {
             let request = request::Request {
-                messages: history.clone(),
+                messages: session.messages().to_vec(),
                 tools: tool_defs.clone(),
                 ..Default::default()
             };
@@ -80,6 +110,8 @@ impl AgentLoop {
             let mut round_reasoning = String::new();
             let mut round_signature: Option<String> = None;
             let mut pending_calls: Vec<(String, String, serde_json::Value)> = Vec::new();
+            let mut round_usage = None;
+            let mut round_stop = None;
 
             while let Some(event) = stream.next().await {
                 match event? {
@@ -97,41 +129,39 @@ impl AgentLoop {
                     provider::CompletionEvent::ToolUse {
                         id, name, input, ..
                     } => pending_calls.push((id, name, input)),
-                    provider::CompletionEvent::Usage(usage) => events.progress(&format!(
-                        "[usage] in={} out={}",
-                        usage.input_tokens, usage.output_tokens
-                    )),
-                    provider::CompletionEvent::Stop(_) => {}
+                    provider::CompletionEvent::Usage(usage) => {
+                        round_usage = Some(usage);
+                        events.progress(&format!(
+                            "[usage] in={} out={}",
+                            usage.input_tokens, usage.output_tokens
+                        ));
+                    }
+                    provider::CompletionEvent::Stop(reason) => round_stop = Some(reason),
                 }
             }
 
-            // 先把「这一轮模型说了什么」写回历史，再追加工具结果。
+            // 先把「这一轮模型说了什么」写回会话，再追加工具结果。
             //
             // 漏掉这步是个真实 bug：下一轮模型看不到自己发过的 tool_call，会重发调用
             // 或答非所问。顺序也必须是 assistant（含 tool_call）→ tool（结果）。
             // 思考排在最前：DeepSeek 要求 `reasoning_content` 按原顺序回放，
             // Anthropic 要求签名思考块在文本之前。
             let had_calls = !pending_calls.is_empty();
-            let mut assistant_parts: Vec<message::ContentPart> =
-                Vec::with_capacity(2 + pending_calls.len());
-            if !round_reasoning.is_empty() || round_signature.is_some() {
-                assistant_parts.push(message::ContentPart::Reasoning {
-                    text: Arc::from(round_reasoning.as_str()),
-                    signature: round_signature.as_deref().map(Arc::from),
-                });
-            }
-            if !round_text.is_empty() {
-                assistant_parts.push(message::ContentPart::Text(Arc::from(round_text.as_str())));
-            }
-            for (id, name, input) in pending_calls {
-                assistant_parts.push(message::ContentPart::tool_call(id, name, input));
-            }
-            if !assistant_parts.is_empty() {
-                history.push(Arc::new(message::Message::new(
-                    message::Role::Assistant,
-                    assistant_parts,
-                )));
-            }
+            session.push_assistant(session::Turn {
+                text: round_text,
+                reasoning: (!round_reasoning.is_empty()).then_some(round_reasoning),
+                signature: round_signature,
+                tool_calls: pending_calls
+                    .iter()
+                    .map(|(id, name, input)| session::ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: session::RecordedInput::Json(input.clone()),
+                    })
+                    .collect(),
+                stop: round_stop,
+                usage: round_usage,
+            });
 
             if !had_calls {
                 return Ok(reply);
@@ -141,41 +171,29 @@ impl AgentLoop {
             // canonical IR 没有 `Tool` 角色：工具结果就是「喂回模型的内容」，
             // OpenAI encoder 再把它拆成 `role:"tool"` 消息。
             // 并行工具调用的结果天然同批，分条会多占信封字节。
-            let mut results: Vec<message::ContentPart> = Vec::new();
-            {
-                let assistant = history.last().expect("assistant message just pushed");
-                for part in assistant.content() {
-                    let message::ContentPart::ToolCall { id, name, input } = part else {
-                        continue;
-                    };
-                    events.progress(&format!("→ tool: {name}"));
-                    let value = input
-                        .as_value()
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::Value::String(input.to_wire_string()));
-                    let outcome = self.tools.execute(name, &value, events).await;
-                    if outcome.is_error {
-                        events.progress(&format!(
-                            "   tool {name} failed: {}",
-                            outcome.part.as_text().unwrap_or("<image>")
-                        ));
-                    }
-                    results.push(message::ContentPart::tool_result(
-                        id.clone(),
-                        vec![outcome.part],
-                        outcome.is_error,
+            let mut records = Vec::with_capacity(pending_calls.len());
+            for (id, name, input) in &pending_calls {
+                events.progress(&format!("→ tool: {name}"));
+                let outcome = self.tools.execute(name, input, events).await;
+                if outcome.is_error {
+                    events.progress(&format!(
+                        "   tool {name} failed: {}",
+                        outcome.part.as_text().unwrap_or("<image>")
                     ));
                 }
+                records.push(session::ToolResultRecord::from_parts(
+                    id,
+                    &[outcome.part],
+                    outcome.is_error,
+                )?);
             }
-            history.push(Arc::new(message::Message::new(
-                message::Role::User,
-                results,
-            )));
+            session.push_tool_results(records);
         }
 
-        Err(provider::LlmError::Transport(format!(
-            "tool loop exceeded {MAX_TOOL_ROUNDS} rounds"
-        )))
+        Err(
+            provider::LlmError::Transport(format!("tool loop exceeded {MAX_TOOL_ROUNDS} rounds"))
+                .into(),
+        )
     }
 }
 
@@ -187,6 +205,8 @@ mod tests {
     use std::sync::Mutex;
 
     use futures::stream;
+
+    use aa_language_model::request::message;
 
     use super::*;
 
@@ -253,6 +273,19 @@ mod tests {
         }
     }
 
+    fn session(system: &str) -> session::Session {
+        session::Session::new(session::Header::new("stub", "test", "", system)).unwrap()
+    }
+
+    fn jsonl(session: &session::Session) -> String {
+        session
+            .events()
+            .iter()
+            .map(|event| event.to_json_line().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[tokio::test]
     async fn records_tool_call_before_results_and_feeds_them_back() {
         let client = Arc::new(ScriptedClient::new([
@@ -275,11 +308,12 @@ mod tests {
         registry.register(Arc::new(Echo));
 
         let agent = AgentLoop::new(client.clone(), registry);
+        let mut session = session("sys");
+        session.push_user_text("hello");
         let reply = agent
             .run(
                 &provider::Model::new("stub", "test"),
-                "sys",
-                "hello",
+                &mut session,
                 &NoEvents,
             )
             .await
@@ -340,8 +374,14 @@ mod tests {
         registry.register(Arc::new(Echo));
 
         let agent = AgentLoop::new(client.clone(), registry);
+        let mut session = session("");
+        session.push_user_text("hi");
         let reply = agent
-            .run(&provider::Model::new("stub", "test"), "", "hi", &NoEvents)
+            .run(
+                &provider::Model::new("stub", "test"),
+                &mut session,
+                &NoEvents,
+            )
             .await
             .unwrap();
         // 思考不进入返回文本。
@@ -380,8 +420,14 @@ mod tests {
             ],
         ]));
         let agent = AgentLoop::new(client.clone(), tool::AgentToolRegistry::new());
+        let mut session = session("");
+        session.push_user_text("hi");
         let reply = agent
-            .run(&provider::Model::new("stub", "test"), "", "hi", &NoEvents)
+            .run(
+                &provider::Model::new("stub", "test"),
+                &mut session,
+                &NoEvents,
+            )
             .await
             .unwrap();
         assert_eq!(reply, "recovered");
@@ -392,6 +438,45 @@ mod tests {
         assert!(matches!(
             tool_msg.content()[0],
             message::ContentPart::ToolResult { is_error: true, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resumed_session_keeps_previous_turns_in_the_request() {
+        let client = Arc::new(ScriptedClient::new([
+            vec![
+                provider::CompletionEvent::Text("一".to_owned()),
+                provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
+            ],
+            vec![
+                provider::CompletionEvent::Text("二".to_owned()),
+                provider::CompletionEvent::Stop(provider::StopReason::EndTurn),
+            ],
+        ]));
+        let agent = AgentLoop::new(client.clone(), tool::AgentToolRegistry::new());
+        let model = provider::Model::new("stub", "test");
+
+        let mut first = session("");
+        first.push_user_text("one");
+        agent.run(&model, &mut first, &NoEvents).await.unwrap();
+
+        // 模拟「写盘 → 重启 → 恢复」。
+        let mut restored = session::Session::from_jsonl(&jsonl(&first)).unwrap();
+        assert_eq!(restored.message_count(), 2);
+
+        restored.push_user_text("two");
+        agent.run(&model, &mut restored, &NoEvents).await.unwrap();
+
+        let seen = client.seen.lock().unwrap();
+        let second = seen.last().unwrap();
+        // user(one) → assistant(一) → user(two)：上一轮的文本确实回放了。
+        assert_eq!(second.messages.len(), 3);
+        assert_eq!(second.messages[0].role(), message::Role::User);
+        assert_eq!(second.messages[1].role(), message::Role::Assistant);
+        assert_eq!(second.messages[2].role(), message::Role::User);
+        assert!(matches!(
+            &second.messages[1].content()[0],
+            message::ContentPart::Text(text) if &**text == "一"
         ));
     }
 }

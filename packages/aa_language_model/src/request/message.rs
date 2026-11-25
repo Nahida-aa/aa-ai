@@ -17,7 +17,8 @@
 //! 因为它装的是「这条消息的内容」，而不是某个 wire 厂商的 message part。
 //!
 //! 注意：canonical IR 目前**不实现 serde**。wire 编码是各 provider 的借用式 encoder
-//! （见 `aa_ai_openai`），持久化格式尚未定，先不把 serde 形状变成事实契约。
+//! （见 `aa_ai_openai`）；持久化走 `aa_agent::session` 的事件日志（ADR 0013），
+//! 不把 IR 形状变成磁盘契约。
 
 use std::mem::size_of;
 use std::sync::Arc;

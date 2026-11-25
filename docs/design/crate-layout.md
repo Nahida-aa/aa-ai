@@ -32,7 +32,7 @@
 | `aa_ai_anthropic`（待建） | `packages/aa_language_models/aa_ai_anthropic/` | 另一套协议（Messages + 签名 thinking） | core + `aa_http_client` |
 | `aa_ai_gemini`（待建） | 同上 | `generateContent` | 同上 |
 | `aa_language_models` | `packages/aa_language_models/` | provider 汇总入口 + 离线 `stub::StubClient` | 各 `aa_ai_*` + core |
-| `aa_agent` | `packages/aa_agent/` | agent loop + 工具执行接口 | core |
+| `aa_agent` | `packages/aa_agent/` | agent loop + 工具执行接口 + 会话日志（格式在库，路径在应用） | core |
 
 > `aa_http_client` 放在 `aa-stack` 而不是本仓：它和 LLM 无关，是通用基础设施
 > （用户 2026-11-20 决定）。`aa_language_model` 仍然零网络依赖，provider crate

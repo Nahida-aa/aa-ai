@@ -68,7 +68,7 @@ aa_ai_ollama/src/
 ### D2. 传输仍是注入的 `Arc<HttpClient>`
 
 新增的 provider 没有重新实现超时/代理/解码重试，直接收
-`Arc<aa_http_client::HttpClient>`（[0010](0010-transport-object.md)）。这是把传输
+`Arc<dyn aa_http_client::HttpClient>`（[0010](0010-transport-object.md)）。这是把传输
 独立出去的第一次兑现：本 crate 里没有一行 `reqwest::Client::builder()`。
 
 ### D3. `StopReason`：`done_reason` + 「本响应出现过工具调用」

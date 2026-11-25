@@ -12,7 +12,7 @@
 **库只接收数据并发请求；配置从哪来、密钥存在哪、默认用哪个模型、代理怎么走，全是应用的事。**
 
 同一条边界也适用于**传输**：`reqwest::Client` 不由 provider 拥有，应用构造一个
-`Arc<aa_http_client::HttpClient>` 交给所有 provider 共享（[ADR 0010](../decisions/0010-transport-object.md)）。
+`Arc<dyn aa_http_client::HttpClient>` 交给所有 provider 共享（[ADR 0010](../decisions/0010-transport-object.md)）。
 
 ## 2. TanStack AI 的库形状（对照）
 
@@ -71,7 +71,7 @@ endpoint、key、headers 和模型名。
 ```rust
 // 应用侧（示意；不是本仓的 API 契约）
 // 传输在应用里构造一次，所有 provider 共享同一个连接池。
-let http = std::sync::Arc::new(aa_http_client::HttpClient::builder().build()?);
+let http: std::sync::Arc<dyn aa_http_client::HttpClient> = aa_http_client::builder().build()?;
 
 let minekuai = aa_language_models::openai::OpenAiLanguageModelProvider::without_auth(http.clone())
     .with_auth_header("x-api-key", app_config.minekuai_key)
@@ -90,7 +90,7 @@ let agnes = aa_language_models::openai::OpenAiLanguageModelProvider::new(http, a
 |---|---|---|
 | 端点 / 鉴权 / 额外 header | ✅ | ✅（构造数据） |
 | `stream_completion`（一次 LLM 调用） | ✅ | ✅ |
-| HTTP 客户端 | ✅ `Arc<dyn HttpClient>` | ❌ 应用传 `Arc<aa_http_client::HttpClient>` |
+| HTTP 客户端 | ✅ `Arc<dyn HttpClient>` | ❌ 应用传 `Arc<dyn aa_http_client::HttpClient>` |
 | provider 注册 / `id` / `name` / `icon` | ✅ `LanguageModelProvider` | ❌ 应用层 |
 | 模型目录 / 默认模型 | ✅ `provided_models` / `default_model` | ❌ 应用层传 `Model` |
 | 认证 UI / `set_api_key` / 钥匙串 | ✅ | ❌ 应用层 |

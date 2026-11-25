@@ -9,11 +9,12 @@ aa_language_model.workspace = true
 aa_http_client.workspace = true
 base64.workspace = true
 futures.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 # 超时测试要起 tokio runtime（reqwest 的 timer/IO 依赖它）。
 tokio.workspace = true
+# 单元测试用 `FakeHttpClient` 离线驱动 provider。
+aa_http_client = { workspace = true, features = ["test-support"] }
 

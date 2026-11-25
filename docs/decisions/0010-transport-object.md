@@ -92,7 +92,7 @@
 
 ```rust
 pub struct OpenAiLanguageModelProvider {
-    http: Arc<aa_http_client::HttpClient>,
+    http: Arc<dyn aa_http_client::HttpClient>,
     auth: Auth,
     base_url: String,
     headers: Vec<(String, String)>,

@@ -856,7 +856,7 @@ mod tests {
                 CompletionEvent::Reasoning {
                     text: String::new(),
                     signature: Some(
-                        r#"[{"index":0,"text":"think more","type":"reasoning.text"}]"#.to_owned()
+                        r#"[{"type":"reasoning.text","index":0,"text":"think more"}]"#.to_owned()
                     ),
                 },
                 CompletionEvent::Usage(aa_language_model::provider::TokenUsage {
@@ -1039,7 +1039,7 @@ mod tests {
                 CompletionEvent::Reasoning {
                     text: String::new(),
                     signature: Some(
-                        r#"[{"index":0,"text":"let me read","type":"reasoning.text"}]"#.to_owned()
+                        r#"[{"type":"reasoning.text","index":0,"text":"let me read"}]"#.to_owned()
                     ),
                 },
                 CompletionEvent::Text("reading".to_owned()),

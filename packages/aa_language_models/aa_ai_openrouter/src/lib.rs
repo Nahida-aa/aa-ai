@@ -23,7 +23,8 @@
 //!
 //! use aa_ai_openrouter::OpenRouterLanguageModelProvider;
 //!
-//! let http = Arc::new(aa_http_client::HttpClient::builder().build()?);
+//! let http: Arc<dyn aa_http_client::HttpClient> =
+//!     aa_http_client::builder().build()?;
 //! let provider = OpenRouterLanguageModelProvider::new(http, "sk-or-...")
 //!     .with_app_title("my-app")
 //!     .with_app_url("https://app.example.com");
@@ -33,7 +34,7 @@
 //! # 传输
 //!
 //! 不拥有 HTTP 客户端：一个进程一个连接池，由调用方构造
-//! `Arc<aa_http_client::HttpClient>` 后传进来
+//! `Arc<dyn aa_http_client::HttpClient>` 后传进来
 //! （[ADR 0010](../../../docs/decisions/0010-transport-object.md)）。
 
 pub mod chat_completion;
@@ -43,7 +44,6 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream;
@@ -63,7 +63,7 @@ enum Auth {
 
 /// OpenRouter 端点。
 ///
-/// 只持有**端点数据**；HTTP 客户端是共享的 `Arc<aa_http_client::HttpClient>`。
+/// 只持有**端点数据**；HTTP 客户端是共享的 `Arc<dyn aa_http_client::HttpClient>`。
 pub struct OpenRouterLanguageModelProvider {
     auth: Auth,
     base_url: String,
@@ -73,23 +73,23 @@ pub struct OpenRouterLanguageModelProvider {
     app_title: Option<String>,
     /// 额外请求 header（`(name, value)`，按顺序追加，同名后者覆盖前者）。
     headers: Vec<(String, String)>,
-    http: Arc<aa_http_client::HttpClient>,
+    http: Arc<dyn aa_http_client::HttpClient>,
 }
 
 impl OpenRouterLanguageModelProvider {
     /// 用 Bearer 鉴权构造。OpenRouter 的对话接口必须带密钥。
-    pub fn new(http: Arc<aa_http_client::HttpClient>, api_key: impl Into<String>) -> Self {
+    pub fn new(http: Arc<dyn aa_http_client::HttpClient>, api_key: impl Into<String>) -> Self {
         Self::with_auth(http, Auth::Bearer(api_key.into()))
     }
 
     /// 不发送 `Authorization`（本地/内网 OpenRouter 兼容网关）。
     ///
     /// 不要用 `new("")` 代替：那会发出空的 `Authorization: Bearer `。
-    pub fn without_auth(http: Arc<aa_http_client::HttpClient>) -> Self {
+    pub fn without_auth(http: Arc<dyn aa_http_client::HttpClient>) -> Self {
         Self::with_auth(http, Auth::None)
     }
 
-    fn with_auth(http: Arc<aa_http_client::HttpClient>, auth: Auth) -> Self {
+    fn with_auth(http: Arc<dyn aa_http_client::HttpClient>, auth: Auth) -> Self {
         Self {
             auth,
             base_url: DEFAULT_BASE_URL.to_owned(),
@@ -136,15 +136,17 @@ impl OpenRouterLanguageModelProvider {
     /// 把鉴权、归因与额外 header 变成 `HeaderMap`。
     ///
     /// 在进入 future 之前同步调用：非法 header 名/值直接变成错误，不 panic、不发请求。
-    fn headers(&self) -> Result<reqwest::header::HeaderMap, aa_language_model::provider::LlmError> {
-        let mut map = reqwest::header::HeaderMap::new();
+    fn headers(&self) -> Result<aa_http_client::http::HeaderMap, aa_language_model::provider::LlmError> {
+        use aa_http_client::http::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut map = HeaderMap::new();
         let mut put = |name: &str, value: &str| {
-            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
                 aa_language_model::provider::LlmError::Transport(format!(
                     "invalid request header name {name:?}: {e}"
                 ))
             })?;
-            let value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+            let value = HeaderValue::from_str(value).map_err(|e| {
                 aa_language_model::provider::LlmError::Transport(format!(
                     "invalid request header value for {name:?}: {e}"
                 ))
@@ -181,20 +183,18 @@ impl OpenRouterLanguageModelProvider {
     ) -> Result<Vec<crate::models::ModelInfo>, aa_language_model::provider::LlmError> {
         let headers = self.headers()?;
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .http
-            .reqwest()
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| {
-                aa_language_model::provider::LlmError::Transport(self.http.describe(&e))
-            })?;
+        let mut resp = send_json(
+            &self.http,
+            aa_http_client::Method::GET,
+            &url,
+            headers,
+            Vec::new(),
+        )
+        .await?;
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            let raw = resp.text().await.unwrap_or_default();
+            let raw = read_text(&mut resp).await.unwrap_or_default();
             return Err(aa_language_model::provider::LlmError::ProviderRejection {
                 status,
                 message: crate::chat_completion::response::error_message(&raw),
@@ -202,11 +202,50 @@ impl OpenRouterLanguageModelProvider {
             });
         }
 
-        let list: crate::models::ModelList = resp.json().await.map_err(|e| {
-            aa_language_model::provider::LlmError::Transport(self.http.describe(&e))
-        })?;
+        let body = aa_http_client::read_body(&mut resp)
+            .await
+            .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))?;
+        let list: crate::models::ModelList = serde_json::from_slice(&body)
+            .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))?;
         Ok(list.data)
     }
+}
+
+// ---------- HTTP 样板 ----------
+
+/// 发一个请求（`body` 为空即 GET）。
+async fn send_json(
+    http: &Arc<dyn aa_http_client::HttpClient>,
+    method: aa_http_client::Method,
+    url: &str,
+    headers: aa_http_client::http::HeaderMap,
+    body: Vec<u8>,
+) -> Result<
+    aa_http_client::Response<aa_http_client::AsyncBody>,
+    aa_language_model::provider::LlmError,
+> {
+    let mut builder = aa_http_client::Request::builder().method(method).uri(url);
+    *builder.headers_mut().expect("刚建的 builder 一定有 headers") = headers;
+    let request = builder
+        .body(aa_http_client::AsyncBody::from(body))
+        .map_err(|error| {
+            aa_language_model::provider::LlmError::Transport(format!(
+                "构造 HTTP 请求失败：{error}"
+            ))
+        })?;
+    http.send(request)
+        .await
+        .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))
+}
+
+/// 把响应体读成文本（错误体用；非 UTF-8 不报错）。
+async fn read_text(
+    response: &mut aa_http_client::Response<aa_http_client::AsyncBody>,
+) -> Result<String, aa_language_model::provider::LlmError> {
+    let body = aa_http_client::read_body(response)
+        .await
+        .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 // ---------- LanguageModelClient ----------
@@ -240,21 +279,13 @@ impl aa_language_model::provider::LanguageModelClient for OpenRouterLanguageMode
         };
         let http = self.http.clone();
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let read_timeout = http.read_timeout();
 
         Box::pin(async move {
-            let resp = http
-                .reqwest()
-                .post(url)
-                .headers(headers)
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| aa_language_model::provider::LlmError::Transport(http.describe(&e)))?;
+            let mut resp = send_json(&http, aa_http_client::Method::POST, &url, headers, body).await?;
 
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
-                let raw = resp.text().await.unwrap_or_default();
+                let raw = read_text(&mut resp).await.unwrap_or_default();
                 let err = aa_language_model::provider::LlmError::ProviderRejection {
                     status,
                     message: crate::chat_completion::response::error_message(&raw),
@@ -264,13 +295,18 @@ impl aa_language_model::provider::LanguageModelClient for OpenRouterLanguageMode
             }
 
             if wants_stream {
-                return Ok(sse_event_stream(resp.bytes_stream(), read_timeout));
+                return Ok(sse_event_stream(resp.into_body()));
             }
 
-            let parsed: crate::chat_completion::response::ChatCompletionResponse = resp
-                .json()
+            let body = aa_http_client::read_body(&mut resp)
                 .await
-                .map_err(|e| aa_language_model::provider::LlmError::Transport(http.describe(&e)))?;
+                .map_err(|error| {
+                    aa_language_model::provider::LlmError::Transport(error.to_string())
+                })?;
+            let parsed: crate::chat_completion::response::ChatCompletionResponse =
+                serde_json::from_slice(&body).map_err(|error| {
+                    aa_language_model::provider::LlmError::Transport(error.to_string())
+                })?;
             Ok(
                 stream::iter(crate::chat_completion::response::non_streaming_events(
                     parsed,
@@ -283,20 +319,16 @@ impl aa_language_model::provider::LanguageModelClient for OpenRouterLanguageMode
 
 // ---------- SSE ----------
 
-/// 把字节流解成 `CompletionEvent` 流（`text/event-stream`）。
+/// 把响应体解成 `CompletionEvent` 流（`text/event-stream`）。
 ///
-/// 泛型 `S`/`B` 是为了不引入 `bytes` 依赖：只要能给出 `AsRef<[u8]>` 的分片即可。
-/// 每个网络分片到货就解码，不把整个响应缓冲起来。
-fn sse_event_stream<S, B>(
-    inner: S,
-    read_timeout: Option<Duration>,
-) -> aa_language_model::provider::EventStream
-where
-    S: futures::Stream<Item = Result<B, reqwest::Error>> + Send + 'static,
-    B: AsRef<[u8]>,
-{
-    struct State<S> {
-        inner: Pin<Box<S>>,
+/// 每读到一块就解码，不把整个 body 缓冲起来。
+fn sse_event_stream(
+    reader: aa_http_client::AsyncBody,
+) -> aa_language_model::provider::EventStream {
+    use futures::AsyncReadExt as _;
+
+    struct State {
+        reader: aa_http_client::AsyncBody,
         decoder: crate::chat_completion::response::StreamDecoder,
         pending: VecDeque<
             Result<
@@ -308,7 +340,7 @@ where
     }
 
     let state = State {
-        inner: Box::pin(inner),
+        reader,
         decoder: crate::chat_completion::response::StreamDecoder::default(),
         pending: VecDeque::new(),
         ended: false,
@@ -322,23 +354,24 @@ where
             if state.ended {
                 return None;
             }
-            match state.inner.next().await {
-                Some(Ok(chunk)) => {
-                    state.pending.extend(state.decoder.push(chunk.as_ref()));
-                }
-                Some(Err(err)) => {
-                    state.ended = true;
-                    state
-                        .pending
-                        .push_back(Err(aa_language_model::provider::LlmError::Transport(
-                            aa_http_client::describe_transport(&err, read_timeout),
-                        )));
-                }
-                None => {
+            let mut chunk = [0u8; 8192];
+            match state.reader.read(&mut chunk).await {
+                Ok(0) => {
                     // 流结束但没收到 `[DONE]` / `finish_reason` → 解码器报 `StreamEnded`。
                     let decoder = std::mem::take(&mut state.decoder);
                     state.pending.extend(decoder.finish());
                     state.ended = true;
+                }
+                Ok(read) => {
+                    state.pending.extend(state.decoder.push(&chunk[..read]));
+                }
+                Err(error) => {
+                    state.ended = true;
+                    state
+                        .pending
+                        .push_back(Err(aa_language_model::provider::LlmError::Transport(
+                            error.to_string(),
+                        )));
                 }
             }
         }
@@ -348,15 +381,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     fn provider() -> super::OpenRouterLanguageModelProvider {
-        let http = Arc::new(
-            aa_http_client::HttpClient::builder()
-                .proxy(aa_http_client::Proxy::Direct)
-                .build()
-                .unwrap(),
-        );
+        let http = aa_http_client::builder()
+            .proxy(aa_http_client::Proxy::Direct)
+            .build()
+            .unwrap();
         super::OpenRouterLanguageModelProvider::new(http, "sk-or-test")
             .with_app_url("https://example.com")
             .with_app_title("aacode")
@@ -385,12 +414,10 @@ mod tests {
 
     #[test]
     fn attribution_headers_are_optional() {
-        let http = Arc::new(
-            aa_http_client::HttpClient::builder()
-                .proxy(aa_http_client::Proxy::Direct)
-                .build()
-                .unwrap(),
-        );
+        let http = aa_http_client::builder()
+            .proxy(aa_http_client::Proxy::Direct)
+            .build()
+            .unwrap();
         let provider = super::OpenRouterLanguageModelProvider::new(http, "sk-or-test");
         let headers = provider.headers().unwrap();
         assert!(!headers.contains_key("http-referer"));

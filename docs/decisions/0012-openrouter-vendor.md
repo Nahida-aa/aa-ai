@@ -92,7 +92,7 @@ aa_ai_openrouter/src/
 
 请求侧只 `Serialize`、响应侧只 `Deserialize`，两边不共享结构体。`encode` 一次
 `to_writer` 成 owned 字节，`'a` 不进 future（同 [0006](0006-wire-request-shape.md)）。
-传输仍收 `Arc<aa_http_client::HttpClient>`，本 crate 没有构造 `reqwest::Client` 的代码。
+传输仍收 `Arc<dyn aa_http_client::HttpClient>`，本 crate 没有构造 `reqwest::Client` 的代码。
 
 ### D2. 思考回放：`reasoning_details` 存进 `ContentPart::Reasoning.signature`
 

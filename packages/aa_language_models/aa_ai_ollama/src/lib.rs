@@ -6,7 +6,7 @@
 //! # 作为库
 //!
 //! 和 `aa_ai_openai` 同一形状：一个实例 = 一份端点配置，传输是共享的
-//! `Arc<aa_http_client::HttpClient>`（[ADR 0010](../../../docs/decisions/0010-transport-object.md)），
+//! `Arc<dyn aa_http_client::HttpClient>`（[ADR 0010](../../../docs/decisions/0010-transport-object.md)），
 //! 不读 env / 配置文件、没有注册表。`base_url` 是**根地址**（默认
 //! `http://localhost:11434`），代码自己拼 `/api/chat`——不要传 `/v1`，那是 OpenAI
 //! 兼容 section 的语义。
@@ -16,7 +16,8 @@
 //!
 //! use aa_ai_ollama::OllamaLanguageModelProvider;
 //!
-//! let http = Arc::new(aa_http_client::HttpClient::builder().build()?);
+//! let http: Arc<dyn aa_http_client::HttpClient> =
+//!     aa_http_client::builder().build()?;
 //! let ollama = OllamaLanguageModelProvider::new(http)
 //!     .with_base_url("http://localhost:11434");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -64,12 +65,12 @@ pub struct OllamaLanguageModelProvider {
     base_url: String,
     /// 额外请求 header（同名后者覆盖前者）。
     headers: Vec<(String, String)>,
-    http: Arc<aa_http_client::HttpClient>,
+    http: Arc<dyn aa_http_client::HttpClient>,
 }
 
 impl OllamaLanguageModelProvider {
     /// 无鉴权构造（本地 Ollama 的常态）。
-    pub fn new(http: Arc<aa_http_client::HttpClient>) -> Self {
+    pub fn new(http: Arc<dyn aa_http_client::HttpClient>) -> Self {
         Self {
             auth: Auth::None,
             base_url: DEFAULT_BASE_URL.to_owned(),
@@ -108,15 +109,17 @@ impl OllamaLanguageModelProvider {
     /// 把鉴权与额外 header 变成 `HeaderMap`。
     ///
     /// 在进入 future 之前同步调用：非法 header 名/值直接变成错误，不 panic、不发请求。
-    fn headers(&self) -> Result<reqwest::header::HeaderMap, aa_language_model::provider::LlmError> {
-        let mut map = reqwest::header::HeaderMap::new();
+    fn headers(&self) -> Result<aa_http_client::http::HeaderMap, aa_language_model::provider::LlmError> {
+        use aa_http_client::http::{HeaderMap, HeaderName, HeaderValue};
+
+        let mut map = HeaderMap::new();
         let mut put = |name: &str, value: &str| {
-            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
                 aa_language_model::provider::LlmError::Transport(format!(
                     "invalid request header name {name:?}: {e}"
                 ))
             })?;
-            let value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+            let value = HeaderValue::from_str(value).map_err(|e| {
                 aa_language_model::provider::LlmError::Transport(format!(
                     "invalid request header value for {name:?}: {e}"
                 ))
@@ -143,20 +146,18 @@ impl OllamaLanguageModelProvider {
     ) -> Result<Vec<crate::models::ModelInfo>, aa_language_model::provider::LlmError> {
         let headers = self.headers()?;
         let url = format!("{}/api/tags", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .http
-            .reqwest()
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|e| {
-                aa_language_model::provider::LlmError::Transport(self.http.describe(&e))
-            })?;
+        let mut resp = send_json(
+            &self.http,
+            aa_http_client::Method::GET,
+            &url,
+            headers,
+            Vec::new(),
+        )
+        .await?;
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            let raw = resp.text().await.unwrap_or_default();
+            let raw = read_text(&mut resp).await.unwrap_or_default();
             return Err(aa_language_model::provider::LlmError::ProviderRejection {
                 status,
                 message: crate::chat::response::error_message(&raw),
@@ -164,11 +165,50 @@ impl OllamaLanguageModelProvider {
             });
         }
 
-        let list: crate::models::ModelList = resp.json().await.map_err(|e| {
-            aa_language_model::provider::LlmError::Transport(self.http.describe(&e))
-        })?;
+        let body = aa_http_client::read_body(&mut resp)
+            .await
+            .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))?;
+        let list: crate::models::ModelList = serde_json::from_slice(&body)
+            .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))?;
         Ok(list.models)
     }
+}
+
+// ---------- HTTP 样板 ----------
+
+/// 发一个请求（`body` 为空即 GET）。
+async fn send_json(
+    http: &Arc<dyn aa_http_client::HttpClient>,
+    method: aa_http_client::Method,
+    url: &str,
+    headers: aa_http_client::http::HeaderMap,
+    body: Vec<u8>,
+) -> Result<
+    aa_http_client::Response<aa_http_client::AsyncBody>,
+    aa_language_model::provider::LlmError,
+> {
+    let mut builder = aa_http_client::Request::builder().method(method).uri(url);
+    *builder.headers_mut().expect("刚建的 builder 一定有 headers") = headers;
+    let request = builder
+        .body(aa_http_client::AsyncBody::from(body))
+        .map_err(|error| {
+            aa_language_model::provider::LlmError::Transport(format!(
+                "构造 HTTP 请求失败：{error}"
+            ))
+        })?;
+    http.send(request)
+        .await
+        .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))
+}
+
+/// 把响应体读成文本（错误体用；非 UTF-8 不报错）。
+async fn read_text(
+    response: &mut aa_http_client::Response<aa_http_client::AsyncBody>,
+) -> Result<String, aa_language_model::provider::LlmError> {
+    let body = aa_http_client::read_body(response)
+        .await
+        .map_err(|error| aa_language_model::provider::LlmError::Transport(error.to_string()))?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 // ---------- LanguageModelClient ----------
@@ -204,18 +244,11 @@ impl aa_language_model::provider::LanguageModelClient for OllamaLanguageModelPro
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
 
         Box::pin(async move {
-            let resp = http
-                .reqwest()
-                .post(url)
-                .headers(headers)
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| aa_language_model::provider::LlmError::Transport(http.describe(&e)))?;
+            let mut resp = send_json(&http, aa_http_client::Method::POST, &url, headers, body).await?;
 
             let status = resp.status().as_u16();
             if !resp.status().is_success() {
-                let raw = resp.text().await.unwrap_or_default();
+                let raw = read_text(&mut resp).await.unwrap_or_default();
                 let error = aa_language_model::provider::LlmError::ProviderRejection {
                     status,
                     message: crate::chat::response::error_message(&raw),
@@ -225,15 +258,12 @@ impl aa_language_model::provider::LanguageModelClient for OllamaLanguageModelPro
             }
 
             if wants_stream {
-                return Ok(ndjson_event_stream(resp.bytes_stream(), http));
+                return Ok(ndjson_event_stream(resp.into_body()));
             }
 
             // `stream: false` 的 body 是同一个形状的**单个对象**：喂给同一个解码器，
             // 由 `finish()` 处理「没有结尾换行」的情况。
-            let raw = resp
-                .text()
-                .await
-                .map_err(|e| aa_language_model::provider::LlmError::Transport(http.describe(&e)))?;
+            let raw = read_text(&mut resp).await?;
             let mut decoder = crate::chat::response::StreamDecoder::default();
             let mut events = decoder.push(raw.as_bytes());
             events.extend(decoder.finish());
@@ -244,23 +274,18 @@ impl aa_language_model::provider::LanguageModelClient for OllamaLanguageModelPro
 
 // ---------- NDJSON 流 ----------
 
-/// 把字节流解成 `CompletionEvent` 流（NDJSON：一行一个对象）。
+/// 把响应体解成 `CompletionEvent` 流（NDJSON：一行一个对象）。
 ///
-/// 泛型 `S`/`B` 是为了不引入 `bytes` 依赖（与 `aa_ai_openai` 同一手法）。
-/// 每个网络分片到货就解码，不把整个响应缓冲起来。
-fn ndjson_event_stream<S, B>(
-    inner: S,
-    http: Arc<aa_http_client::HttpClient>,
-) -> aa_language_model::provider::EventStream
-where
-    S: futures::Stream<Item = Result<B, reqwest::Error>> + Send + 'static,
-    B: AsRef<[u8]>,
-{
+/// 每读到一块就解码，不把整个响应缓冲起来。
+fn ndjson_event_stream(
+    reader: aa_http_client::AsyncBody,
+) -> aa_language_model::provider::EventStream {
+    use futures::AsyncReadExt as _;
+
     let state = NdjsonState {
-        inner: Box::pin(inner),
+        reader,
         decoder: crate::chat::response::StreamDecoder::default(),
         pending: VecDeque::new(),
-        http,
         ended: false,
     };
 
@@ -272,25 +297,25 @@ where
             if state.ended {
                 return None;
             }
-            match state.inner.next().await {
-                Some(Ok(chunk)) => {
-                    let events = state.decoder.push(chunk.as_ref());
-                    state.pending.extend(events);
-                }
-                Some(Err(err)) => {
-                    state.ended = true;
-                    let message = state.http.describe(&err);
-                    state
-                        .pending
-                        .push_back(Err(aa_language_model::provider::LlmError::Transport(
-                            message,
-                        )));
-                }
-                None => {
+            let mut chunk = [0u8; 8192];
+            match state.reader.read(&mut chunk).await {
+                Ok(0) => {
                     // 流结束但没收到 `done: true` → 解码器报 `StreamEnded`。
                     let decoder = std::mem::take(&mut state.decoder);
                     state.pending.extend(decoder.finish());
                     state.ended = true;
+                }
+                Ok(read) => {
+                    let events = state.decoder.push(&chunk[..read]);
+                    state.pending.extend(events);
+                }
+                Err(error) => {
+                    state.ended = true;
+                    state
+                        .pending
+                        .push_back(Err(aa_language_model::provider::LlmError::Transport(
+                            error.to_string(),
+                        )));
                 }
             }
         }
@@ -299,13 +324,12 @@ where
 }
 
 /// [`ndjson_event_stream`] 的状态：字节流 + 解码器 + 待吐事件。
-struct NdjsonState<S> {
-    inner: Pin<Box<S>>,
+struct NdjsonState {
+    reader: aa_http_client::AsyncBody,
     decoder: crate::chat::response::StreamDecoder,
     pending: VecDeque<
         Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
     >,
-    http: Arc<aa_http_client::HttpClient>,
     /// 网络流已结束（或出错），只剩 `pending` 要吐。
     ended: bool,
 }
@@ -322,13 +346,11 @@ mod tests {
     }
 
     /// 测试专用传输：绕过环境变量代理，保证请求打到本地假端点。
-    fn direct_http() -> Arc<aa_http_client::HttpClient> {
-        Arc::new(
-            aa_http_client::HttpClient::builder()
-                .proxy(aa_http_client::Proxy::Direct)
-                .build()
-                .expect("测试用 HTTP 客户端必须能构造"),
-        )
+    fn direct_http() -> Arc<dyn aa_http_client::HttpClient> {
+        aa_http_client::builder()
+            .proxy(aa_http_client::Proxy::Direct)
+            .build()
+            .expect("测试用 HTTP 客户端必须能构造")
     }
 
     fn user_request(stream: bool) -> aa_language_model::request::Request {

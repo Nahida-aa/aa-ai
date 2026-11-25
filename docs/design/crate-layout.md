@@ -65,10 +65,10 @@ aa_agent ──> aa_language_model
 
 - **core 不认识任何厂商的 JSON 字段，也不依赖 `reqwest`。** 加一家 provider = 新增
   一个 `aa_ai_*` crate，core 一行不改。
-- **传输不归 provider**：`reqwest::Client` 只在 `aa_http_client` 里**构造**，provider
-  收一个 `Arc<aa_http_client::HttpClient>` 并调 `http.reqwest()` 发请求。provider
-  crate 仍然依赖 `reqwest`（要用 `HeaderMap` / `reqwest::Error` / `bytes_stream()`），
-  但没有任何构造客户端的代码。
+- **传输不归 provider**：`reqwest::Client` 只在 `aa_reqwest_client` 里**构造**，provider
+  收一个 `Arc<dyn aa_http_client::HttpClient>` 并调 `http.send(request)` 发请求。
+  provider crate 不再依赖 `reqwest`（header 类型从 `aa_http_client::http` 取），
+  也没有任何构造客户端的代码。
 - `aa_language_models` 只做**命名空间转发**（`openai::OpenAiLanguageModelProvider` 等），
   不摊平 IR 类型：`request::Request` 只有
   `aa_language_model::request::Request` 一条规范路径。

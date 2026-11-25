@@ -109,7 +109,7 @@ self.proxy.as_deref()
 ## 5. 本仓（aa-ai）现状
 
 传输已独立成 `aa-stack/packages/util/aa_http_client`（[ADR 0010](../decisions/0010-transport-object.md)），
-`aa_ai_openai` 只接收 `Arc<aa_http_client::HttpClient>`：
+`aa_ai_openai` 只接收 `Arc<dyn aa_http_client::HttpClient>`：
 
 - 一个进程一个连接池（`Arc` 共享），不再每个 provider 各建一个 `reqwest::Client`。
 - 常量与 Zed 对齐：`connect_timeout` 10s、`tcp_keepalive` 30s、

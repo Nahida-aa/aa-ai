@@ -19,7 +19,7 @@ use serde::Serialize;
 /// user 轮里的 `aa_language_model::request::message::ContentPart::ToolResult`。
 ///
 /// `Developer` 是 `System` 的新名字（o 系列 / GPT-5）：同一个语义，由
-/// `Model::uses_developer_role` 决定发哪个 `role`。
+/// `LanguageModel::uses_developer_role` 决定发哪个 `role`。
 #[derive(Debug, Serialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatMessage<'a> {

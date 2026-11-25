@@ -108,7 +108,7 @@ impl AgentLoop {
     /// 模型输出与工具结果，所以恢复会话后可以直接继续跑。
     pub async fn run(
         &self,
-        model: &provider::Model,
+        model: &provider::LanguageModel,
         session: &mut session::Session,
         events: &impl tool::ToolEvents,
     ) -> Result<String, AgentError> {
@@ -310,7 +310,7 @@ mod tests {
         session.push_user_text("hello");
         let reply = agent
             .run(
-                &provider::Model::new("fake", "test"),
+                &provider::LanguageModel::new("fake", "test"),
                 &mut session,
                 &NoEvents,
             )
@@ -376,7 +376,7 @@ mod tests {
         session.push_user_text("hi");
         let reply = agent
             .run(
-                &provider::Model::new("fake", "test"),
+                &provider::LanguageModel::new("fake", "test"),
                 &mut session,
                 &NoEvents,
             )
@@ -422,7 +422,7 @@ mod tests {
         session.push_user_text("hi");
         let reply = agent
             .run(
-                &provider::Model::new("fake", "test"),
+                &provider::LanguageModel::new("fake", "test"),
                 &mut session,
                 &NoEvents,
             )
@@ -452,7 +452,7 @@ mod tests {
             ],
         ]));
         let agent = AgentLoop::new(client.clone(), tool::AgentToolRegistry::new());
-        let model = provider::Model::new("fake", "test");
+        let model = provider::LanguageModel::new("fake", "test");
 
         let mut first = session("");
         first.push_user_text("one");
@@ -514,9 +514,9 @@ mod tests {
         }
         session.push_user_text("latest");
 
-        let model = provider::Model {
+        let model = provider::LanguageModel {
             context_window: Some(4_000),
-            ..provider::Model::new("fake", "test")
+            ..provider::LanguageModel::new("fake", "test")
         };
         let config = compaction::CompactionConfig {
             min_context_window: 0,
@@ -593,9 +593,9 @@ mod tests {
             is_error: false,
         }]);
 
-        let model = provider::Model {
+        let model = provider::LanguageModel {
             context_window: Some(1_000),
-            ..provider::Model::new("fake", "test")
+            ..provider::LanguageModel::new("fake", "test")
         };
         let config = compaction::CompactionConfig {
             min_context_window: 0,
@@ -619,9 +619,9 @@ mod tests {
         let mut session = session("");
         session.push_user_text("hi");
 
-        let model = provider::Model {
+        let model = provider::LanguageModel {
             context_window: Some(100_000),
-            ..provider::Model::new("fake", "test")
+            ..provider::LanguageModel::new("fake", "test")
         };
         AgentLoop::new(client.clone(), tool::AgentToolRegistry::new())
             .run(&model, &mut session, &NoEvents)

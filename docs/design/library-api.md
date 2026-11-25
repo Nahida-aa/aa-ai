@@ -52,8 +52,8 @@ endpoint、key、headers 和模型名。
 
 - `aa_ai_<vendor>::<Vendor>LanguageModelProvider`：一份**已经解好的**端点配置
   （`base_url` / 鉴权 / 额外 header）+ `LanguageModelClient` 实现；
-- `aa_language_model::provider::Model`：模型事实（输出上限、tools/images、
-  `max_completion_tokens`、`developer` 角色、上下文窗口）；
+- `aa_language_model::provider::LanguageModel`：模型事实（输出上限、tools/images、
+  `max_completion_tokens`、`developer` 角色、结构化输出能力位、上下文窗口）；
 - `aa_language_model::request::Request` / `Message`：canonical IR；
 - 可选 wire 能力：`list_models()`（`GET /models`）——只看端点返回，不读本地配置。
 

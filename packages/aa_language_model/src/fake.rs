@@ -27,7 +27,10 @@ use futures::StreamExt;
 use futures::stream;
 
 /// 每次 `stream_completion` 用 `(model, request)` 现算一轮事件。
-type Responder = dyn Fn(&crate::provider::Model, &crate::request::Request) -> Vec<crate::provider::CompletionEvent>
+type Responder = dyn Fn(
+        &crate::provider::LanguageModel,
+        &crate::request::Request,
+    ) -> Vec<crate::provider::CompletionEvent>
     + Send
     + Sync;
 
@@ -46,7 +49,7 @@ impl FakeClient {
     /// 想回随机内容、按请求长度变化、或按规则返回工具调用，都用它。
     pub fn with_handler(
         handler: impl Fn(
-            &crate::provider::Model,
+            &crate::provider::LanguageModel,
             &crate::request::Request,
         ) -> Vec<crate::provider::CompletionEvent>
         + Send
@@ -117,7 +120,7 @@ impl FakeClient {
 impl crate::provider::LanguageModelClient for FakeClient {
     fn stream_completion(
         &self,
-        model: &crate::provider::Model,
+        model: &crate::provider::LanguageModel,
         request: &crate::request::Request,
     ) -> Pin<
         Box<
@@ -139,11 +142,11 @@ mod tests {
     use futures::executor::block_on;
 
     use super::*;
-    use crate::provider::{CompletionEvent, LanguageModelClient, Model, StopReason};
+    use crate::provider::{CompletionEvent, LanguageModel, LanguageModelClient, StopReason};
     use crate::request::{Request, message};
 
-    fn model() -> Model {
-        Model::new("fake", "fake")
+    fn model() -> LanguageModel {
+        LanguageModel::new("fake", "fake")
     }
 
     fn request(text: &str) -> Request {

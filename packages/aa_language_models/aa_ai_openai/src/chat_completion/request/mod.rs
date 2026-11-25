@@ -33,7 +33,7 @@ pub struct ChatCompletionRequest<'a> {
     /// 旧模型的输出上限。与 `max_completion_tokens` 二选一，由模型能力决定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// 新模型（o 系列 / GPT-5+）要求的输出上限键名。由 `Model` 能力位决定。
+    /// 新模型（o 系列 / GPT-5+）要求的输出上限键名。由 `LanguageModel` 能力位决定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u64>,
     pub stream: bool,
@@ -148,10 +148,12 @@ pub struct ChatJsonSchema<'a> {
 ///   **不静默丢弃**（丢图会让模型答得莫名其妙，比报错难查得多）；
 /// - `Opaque` → 跳过（provider 私有负载没有通用 wire 槽位）。
 ///
-/// **能力位在这里生效**（`Model`，见 ADR 0006 D4）：
+/// **能力位在这里生效**（`LanguageModel`，见 ADR 0006 D4）：
 /// - `uses_developer_role` → `System` 发成 `role: "developer"`；
 /// - `supports_tools = false` + 请求带工具 → [`LlmError::Unsupported`]；
-/// - `supports_images = false` + 请求带图片 → [`LlmError::Unsupported`]。
+/// - `supports_images = false` + 请求带图片 → [`LlmError::Unsupported`]；
+/// - `response_format_support` 未开启对应变体 + 请求带 `response_format` →
+///   [`LlmError::Unsupported`]。
 ///
 /// 约定：**工具结果独占一条 user 消息**，不和用户文本混排。Zed 的
 /// `AgentMessage::to_request()` 也是把一条 agent 消息拆成「assistant（文本/思考/
@@ -159,15 +161,25 @@ pub struct ChatJsonSchema<'a> {
 /// 翻译，不存在「文本与工具结果混在一条消息里」需要拆分的场景；真出现就是构造 bug。
 pub fn to_chat_completion_request<'a>(
     request: &'a aa_language_model::request::Request,
-    model: &'a aa_language_model::provider::Model,
+    model: &'a aa_language_model::provider::LanguageModel,
 ) -> Result<ChatCompletionRequest<'a>, aa_language_model::provider::LlmError> {
     // 能力位先校验：不支持的东西发出去只会让端点 400，错误还看不清原因。
     if !model.supports_tools && !request.tools.is_empty() {
         return Err(aa_language_model::provider::LlmError::Unsupported(format!(
-            "模型 `{}` 标记为不支持工具（Model::supports_tools = false），\
+            "模型 `{}` 标记为不支持工具（LanguageModel::supports_tools = false），\
              但请求带了 {} 个工具",
             model.id,
             request.tools.len()
+        )));
+    }
+
+    if let Some(format) = &request.response_format
+        && !model.supports_response_format(format)
+    {
+        return Err(aa_language_model::provider::LlmError::Unsupported(format!(
+            "模型 `{}` 标记为不支持请求的结构化输出\
+             （LanguageModel::response_format_support 未开启对应变体）",
+            model.id
         )));
     }
 
@@ -317,10 +329,10 @@ pub fn to_chat_completion_request<'a>(
 /// 把借用 DTO 直接 `to_writer` 成 owned 字节。
 ///
 /// 这是 DTO 唯一该被消费的方式：`'a` 在本函数返回时即终结，产出的 `Vec<u8>`
-/// 不借用 `Request` / `Model`，可暂存、可重试、可跨 `.await`（0006 D1）。
+/// 不借用 `Request` / `LanguageModel`，可暂存、可重试、可跨 `.await`（0006 D1）。
 pub fn encode<'a>(
     request: &'a aa_language_model::request::Request,
-    model: &'a aa_language_model::provider::Model,
+    model: &'a aa_language_model::provider::LanguageModel,
 ) -> Result<Vec<u8>, aa_language_model::provider::LlmError> {
     let body = to_chat_completion_request(request, model)?;
     let mut bytes = Vec::new();
@@ -370,7 +382,7 @@ fn to_wire_response_format(
 /// 所以图片结果不用丢。
 fn tool_result_content<'a>(
     content: &'a [aa_language_model::request::message::ToolResultPart],
-    model: &aa_language_model::provider::Model,
+    model: &aa_language_model::provider::LanguageModel,
 ) -> Result<
     crate::chat_completion::request::message::ChatMessageContent<'a>,
     aa_language_model::provider::LlmError,
@@ -424,14 +436,14 @@ fn push_text<'a>(
 /// 一张图片 → `image_url` part。模型不支持图片时明确报错。
 fn image_part<'a>(
     image: &'a aa_language_model::request::message::Image,
-    model: &aa_language_model::provider::Model,
+    model: &aa_language_model::provider::LanguageModel,
 ) -> Result<
     crate::chat_completion::request::message::ChatContentPart<'a>,
     aa_language_model::provider::LlmError,
 > {
     if !model.supports_images {
         return Err(aa_language_model::provider::LlmError::Unsupported(format!(
-            "模型 `{}` 标记为不支持图片输入（Model::supports_images = false）",
+            "模型 `{}` 标记为不支持图片输入（LanguageModel::supports_images = false）",
             model.id
         )));
     }

@@ -171,22 +171,34 @@ pub enum ToolKind {
 ///   字节）→ [`LlmError::Unsupported`]，不静默丢图；
 /// - `Opaque` → 跳过。
 ///
-/// **能力位**（`Model`，ADR 0006 D4）：
+/// **能力位**（`LanguageModel`，ADR 0006 D4）：
 /// - `supports_tools = false` + 请求带工具 → `Unsupported`；
-/// - `supports_images = false` + 请求带图片 → `Unsupported`。
+/// - `supports_images = false` + 请求带图片 → `Unsupported`；
+/// - `response_format_support` 未开启对应变体 + 请求带 `response_format` →
+///   `Unsupported`。
 ///
 /// `tool_choice` / `response_format` 之外的每请求字段：`tool_choice` 在 Ollama
 /// 没有对应物，**忽略**（`Request` 的约定：provider 无法表达时忽略，不报错）。
 pub fn to_chat_request<'a>(
     request: &'a aa_language_model::request::Request,
-    model: &'a aa_language_model::provider::Model,
+    model: &'a aa_language_model::provider::LanguageModel,
 ) -> Result<ChatRequest<'a>, aa_language_model::provider::LlmError> {
     if !model.supports_tools && !request.tools.is_empty() {
         return Err(aa_language_model::provider::LlmError::Unsupported(format!(
-            "模型 `{}` 标记为不支持工具（Model::supports_tools = false），\
+            "模型 `{}` 标记为不支持工具（LanguageModel::supports_tools = false），\
              但请求带了 {} 个工具",
             model.id,
             request.tools.len()
+        )));
+    }
+
+    if let Some(format) = &request.response_format
+        && !model.supports_response_format(format)
+    {
+        return Err(aa_language_model::provider::LlmError::Unsupported(format!(
+            "模型 `{}` 标记为不支持请求的结构化输出\
+             （LanguageModel::response_format_support 未开启对应变体）",
+            model.id
         )));
     }
 
@@ -321,11 +333,11 @@ pub fn to_chat_request<'a>(
 
 /// 把借用 DTO 直接 `to_writer` 成 owned 字节。
 ///
-/// `'a` 在返回时终结：产出的 `Vec<u8>` 不借用 `Request` / `Model`，可暂存、可重试、
+/// `'a` 在返回时终结：产出的 `Vec<u8>` 不借用 `Request` / `LanguageModel`，可暂存、可重试、
 /// 可跨 `.await`（ADR 0006 D1）。
 pub fn encode(
     request: &aa_language_model::request::Request,
-    model: &aa_language_model::provider::Model,
+    model: &aa_language_model::provider::LanguageModel,
 ) -> Result<Vec<u8>, aa_language_model::provider::LlmError> {
     let body = to_chat_request(request, model)?;
     let mut bytes = Vec::new();
@@ -339,7 +351,7 @@ fn tool_message<'a>(
     call_id: &'a str,
     content: &'a [aa_language_model::request::message::ToolResultPart],
     call_names: &[(&'a str, &'a str)],
-    model: &aa_language_model::provider::Model,
+    model: &aa_language_model::provider::LanguageModel,
 ) -> Result<ChatMessage<'a>, aa_language_model::provider::LlmError> {
     let mut text = Cow::Borrowed("");
     let mut has_text = false;
@@ -411,14 +423,14 @@ fn to_wire_format<'a>(
 /// 图片 → base64 文本（Ollama 的 `images` 是裸 base64，不带 `data:` 前缀）。
 fn image_base64<'a>(
     image: &'a aa_language_model::request::message::Image,
-    model: &aa_language_model::provider::Model,
+    model: &aa_language_model::provider::LanguageModel,
 ) -> Result<Cow<'a, str>, aa_language_model::provider::LlmError> {
     use aa_language_model::request::message::ImageSource;
     use base64::Engine as _;
 
     if !model.supports_images {
         return Err(aa_language_model::provider::LlmError::Unsupported(format!(
-            "模型 `{}` 标记为不支持图片输入（Model::supports_images = false）",
+            "模型 `{}` 标记为不支持图片输入（LanguageModel::supports_images = false）",
             model.id
         )));
     }
@@ -444,13 +456,27 @@ mod tests {
 
     use super::to_chat_request;
 
-    fn model(id: &str) -> aa_language_model::provider::Model {
-        let mut model = aa_language_model::provider::Model::new("ollama", id);
+    fn model(id: &str) -> aa_language_model::provider::LanguageModel {
+        let mut model = aa_language_model::provider::LanguageModel::new("ollama", id);
         model.supports_tools = true;
         model
     }
 
-    fn json(request: &Request, model: &aa_language_model::provider::Model) -> serde_json::Value {
+    /// 开启了全部结构化输出能力位的模型。
+    fn structured_model(id: &str) -> aa_language_model::provider::LanguageModel {
+        let mut model = model(id);
+        model.response_format_support = aa_language_model::provider::ResponseFormatSupport {
+            json_object: true,
+            json_schema: true,
+            strict: true,
+        };
+        model
+    }
+
+    fn json(
+        request: &Request,
+        model: &aa_language_model::provider::LanguageModel,
+    ) -> serde_json::Value {
         serde_json::to_value(to_chat_request(request, model).unwrap()).unwrap()
     }
 
@@ -674,7 +700,7 @@ mod tests {
             response_format: Some(ResponseFormat::JsonObject),
             ..Default::default()
         };
-        assert_eq!(json(&request, &model("m"))["format"], "json");
+        assert_eq!(json(&request, &structured_model("m"))["format"], "json");
 
         let request = Request {
             response_format: Some(ResponseFormat::JsonSchema {
@@ -686,7 +712,7 @@ mod tests {
         };
         // 裸 schema，不带 OpenAI 的 `json_schema` 信封。
         assert_eq!(
-            json(&request, &model("m"))["format"],
+            json(&request, &structured_model("m"))["format"],
             serde_json::json!({"type": "object"})
         );
 
@@ -695,6 +721,21 @@ mod tests {
             ..Default::default()
         };
         assert!(json(&request, &model("m")).get("format").is_none());
+    }
+
+    #[test]
+    fn unsupported_response_format_is_rejected() {
+        use aa_language_model::request::ResponseFormat;
+
+        let request = Request {
+            response_format: Some(ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let error = to_chat_request(&request, &model("m")).unwrap_err();
+        assert!(
+            matches!(error, aa_language_model::provider::LlmError::Unsupported(_)),
+            "{error}"
+        );
     }
 
     #[test]

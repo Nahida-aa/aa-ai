@@ -34,7 +34,7 @@ pub struct ChatCompletionRequest<'a> {
     /// 旧模型的输出上限。与 `max_completion_tokens` 二选一，由模型能力决定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// 新模型的输出上限键名。由 `Model::uses_max_completion_tokens` 决定。
+    /// 新模型的输出上限键名。由 `LanguageModel::uses_max_completion_tokens` 决定。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u64>,
     pub stream: bool,
@@ -140,19 +140,29 @@ pub struct ChatJsonSchema<'a> {
 /// - `ToolResult` → 独立的 `role:"tool"` 消息；
 /// - `Image` → `image_url`；模型不支持图片就报错，不静默丢弃。
 ///
-/// **能力位**（`Model`，ADR 0006 D4）：`uses_developer_role`、`supports_tools`、
+/// **能力位**（`LanguageModel`，ADR 0006 D4）：`uses_developer_role`、`supports_tools`、
 /// `supports_images`、`supports_parallel_tool_calls`、`uses_max_completion_tokens`、
 /// `supports_prompt_cache_key`。
 pub fn to_chat_completion_request<'a>(
     request: &'a aa_language_model::request::Request,
-    model: &'a aa_language_model::provider::Model,
+    model: &'a aa_language_model::provider::LanguageModel,
 ) -> Result<ChatCompletionRequest<'a>, aa_language_model::provider::LlmError> {
     if !model.supports_tools && !request.tools.is_empty() {
         return Err(aa_language_model::provider::LlmError::Unsupported(format!(
-            "模型 `{}` 标记为不支持工具（Model::supports_tools = false），\
+            "模型 `{}` 标记为不支持工具（LanguageModel::supports_tools = false），\
              但请求带了 {} 个工具",
             model.id,
             request.tools.len()
+        )));
+    }
+
+    if let Some(format) = &request.response_format
+        && !model.supports_response_format(format)
+    {
+        return Err(aa_language_model::provider::LlmError::Unsupported(format!(
+            "模型 `{}` 标记为不支持请求的结构化输出\
+             （LanguageModel::response_format_support 未开启对应变体）",
+            model.id
         )));
     }
 
@@ -317,7 +327,7 @@ pub fn to_chat_completion_request<'a>(
 /// 把借用 DTO 直接 `to_writer` 成 owned 字节（`'a` 在返回时终结）。
 pub fn encode<'a>(
     request: &'a aa_language_model::request::Request,
-    model: &'a aa_language_model::provider::Model,
+    model: &'a aa_language_model::provider::LanguageModel,
 ) -> Result<Vec<u8>, aa_language_model::provider::LlmError> {
     let body = to_chat_completion_request(request, model)?;
     let mut bytes = Vec::new();
@@ -382,7 +392,7 @@ fn to_wire_response_format(
 /// 工具结果的一段内容：文本借用，图片转 data URL。
 fn tool_result_content<'a>(
     content: &'a [aa_language_model::request::message::ToolResultPart],
-    model: &aa_language_model::provider::Model,
+    model: &aa_language_model::provider::LanguageModel,
 ) -> Result<
     crate::chat_completion::request::message::ChatMessageContent<'a>,
     aa_language_model::provider::LlmError,
@@ -435,14 +445,14 @@ fn push_text<'a>(
 /// 一张图片 → `image_url` part。模型不支持图片时明确报错。
 fn image_part<'a>(
     image: &'a aa_language_model::request::message::Image,
-    model: &aa_language_model::provider::Model,
+    model: &aa_language_model::provider::LanguageModel,
 ) -> Result<
     crate::chat_completion::request::message::ChatContentPart<'a>,
     aa_language_model::provider::LlmError,
 > {
     if !model.supports_images {
         return Err(aa_language_model::provider::LlmError::Unsupported(format!(
-            "模型 `{}` 标记为不支持图片输入（Model::supports_images = false）",
+            "模型 `{}` 标记为不支持图片输入（LanguageModel::supports_images = false）",
             model.id
         )));
     }
@@ -481,8 +491,8 @@ mod tests {
     use aa_language_model::request::message::{ContentPart, Message, Role};
     use aa_language_model::request::{Request, ToolChoice};
 
-    fn model(id: &str) -> aa_language_model::provider::Model {
-        aa_language_model::provider::Model::new("open_router", id)
+    fn model(id: &str) -> aa_language_model::provider::LanguageModel {
+        aa_language_model::provider::LanguageModel::new("open_router", id)
     }
 
     fn request(messages: Vec<Message>) -> Request {
@@ -493,7 +503,7 @@ mod tests {
         }
     }
 
-    fn encoded(request: &Request, model: &aa_language_model::provider::Model) -> Value {
+    fn encoded(request: &Request, model: &aa_language_model::provider::LanguageModel) -> Value {
         let bytes = super::encode(request, model).unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
@@ -687,5 +697,48 @@ mod tests {
             err,
             aa_language_model::provider::LlmError::Unsupported(_)
         ));
+    }
+
+    #[test]
+    fn rejects_response_format_when_capability_is_off() {
+        use aa_language_model::request::ResponseFormat;
+
+        let mut request = request(vec![Message::new(
+            Role::User,
+            vec![ContentPart::text("hi")],
+        )]);
+        request.response_format = Some(ResponseFormat::JsonObject);
+
+        let err = super::encode(&request, &model("vendor/model")).unwrap_err();
+        assert!(matches!(
+            err,
+            aa_language_model::provider::LlmError::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn encodes_json_schema_response_format_when_supported() {
+        use aa_language_model::request::ResponseFormat;
+
+        let mut request = request(vec![Message::new(
+            Role::User,
+            vec![ContentPart::text("hi")],
+        )]);
+        request.response_format = Some(ResponseFormat::JsonSchema {
+            name: "person".to_owned(),
+            schema: serde_json::json!({"type": "object"}),
+            strict: true,
+        });
+        let mut model = model("vendor/model");
+        model.response_format_support = aa_language_model::provider::ResponseFormatSupport {
+            json_object: true,
+            json_schema: true,
+            strict: true,
+        };
+
+        let body = encoded(&request, &model);
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["name"], "person");
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
     }
 }

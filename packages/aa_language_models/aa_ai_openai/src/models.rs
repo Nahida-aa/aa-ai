@@ -23,7 +23,7 @@ pub struct ModelList {
 /// 列表里的一项。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelInfo {
-    /// 要填进 `provider::Model::new(_, id)` 的名字。
+    /// 要填进 `provider::LanguageModel::new(_, id)` 的名字。
     pub id: String,
     /// 有些网关给 `owned_by`，纯 OpenAI 形状不一定有。
     #[serde(default)]

@@ -19,7 +19,9 @@ mod event;
 mod model;
 
 pub use event::CompletionEvent;
-pub use model::{Model, ReasoningEffort, ServiceTier, StopReason, TokenUsage};
+pub use model::{
+    LanguageModel, ReasoningEffort, ResponseFormatSupport, ServiceTier, StopReason, TokenUsage,
+};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -49,7 +51,7 @@ pub trait LanguageModelClient: Send + Sync + 'static {
     /// 不是每次 stream 事件。
     fn stream_completion(
         &self,
-        model: &Model,
+        model: &LanguageModel,
         request: &crate::request::Request,
     ) -> Pin<Box<dyn Future<Output = Result<EventStream, LlmError>> + Send + 'static>>;
 }

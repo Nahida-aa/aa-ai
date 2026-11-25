@@ -4,7 +4,7 @@
 //! OpenAI 是 `{"data":[{"id","owned_by"}]}`，Ollama 是
 //! `{"models":[{"name","model","size","digest","details":{...}}]}`。
 //!
-//! 应用拿到 `name` 后填进 `aa_language_model::provider::Model::new("ollama", name)`。
+//! 应用拿到 `name` 后填进 `aa_language_model::provider::LanguageModel::new("ollama", name)`。
 
 use serde::Deserialize;
 
@@ -18,7 +18,7 @@ pub struct ModelList {
 /// 列表里的一项。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelInfo {
-    /// 完整名字（含 tag），例如 `qwen2.5:0.5b`。这是要填进 `Model::id` 的值。
+    /// 完整名字（含 tag），例如 `qwen2.5:0.5b`。这是要填进 `LanguageModel::id` 的值。
     pub name: String,
     /// 模型名（多数版本与 `name` 相同；老版本可能只有这个）。
     #[serde(default)]
@@ -41,7 +41,7 @@ pub struct ModelDetails {
 }
 
 impl ModelInfo {
-    /// 取一个可用于 `Model::new` 的 id（优先 `name`）。
+    /// 取一个可用于 `LanguageModel::new` 的 id（优先 `name`）。
     pub fn id(&self) -> &str {
         &self.name
     }

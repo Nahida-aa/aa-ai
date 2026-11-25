@@ -259,7 +259,7 @@ async fn read_text(
 impl aa_language_model::provider::LanguageModelClient for OpenRouterLanguageModelProvider {
     fn stream_completion(
         &self,
-        model: &aa_language_model::provider::Model,
+        model: &aa_language_model::provider::LanguageModel,
         request: &aa_language_model::request::Request,
     ) -> Pin<
         Box<

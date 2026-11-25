@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
-use aa_language_model::provider::{self, CompletionEvent, Model};
+use aa_language_model::provider::{self, CompletionEvent, LanguageModel};
 use aa_language_model::request::Request;
 use aa_language_model::request::message::{ContentPart, Message, Role, ToolResultPart};
 use aa_language_model::request::tools;
@@ -140,14 +140,14 @@ impl Default for CompactionConfig {
 }
 
 /// 可用的输入预算：窗口减去这次回复的输出上限（对齐 Zed `input_token_capacity`）。
-pub fn input_capacity(model: &Model) -> Option<u64> {
+pub fn input_capacity(model: &LanguageModel) -> Option<u64> {
     let window = model.context_window?;
     Some(window.saturating_sub(model.max_output_tokens.unwrap_or(0)))
 }
 
 /// 需要压缩时返回压缩前的估算 token 数。
 pub fn should_compact(
-    model: &Model,
+    model: &LanguageModel,
     messages: &[Arc<Message>],
     tools: &[Arc<tools::Tool>],
     config: &CompactionConfig,
@@ -250,7 +250,7 @@ impl From<provider::LlmError> for CompactionError {
 /// `tool_call` 和它的 `tool_result` 拆开，下一轮模型会看到孤儿结果。
 pub async fn maybe_compact(
     llm: &dyn provider::LanguageModelClient,
-    model: &Model,
+    model: &LanguageModel,
     session: &mut Session,
     tools: &[Arc<tools::Tool>],
     config: &CompactionConfig,
@@ -361,13 +361,13 @@ mod tests {
 
     #[test]
     fn input_capacity_reserves_the_output_budget() {
-        let model = Model {
+        let model = LanguageModel {
             context_window: Some(100_000),
             max_output_tokens: Some(20_000),
-            ..Model::new("fake", "test")
+            ..LanguageModel::new("fake", "test")
         };
         assert_eq!(input_capacity(&model), Some(80_000));
-        assert_eq!(input_capacity(&Model::new("fake", "test")), None);
+        assert_eq!(input_capacity(&LanguageModel::new("fake", "test")), None);
     }
 
     #[test]
@@ -376,9 +376,9 @@ mod tests {
             Role::User,
             vec![ContentPart::text("x".repeat(200_000))],
         ));
-        let model = Model {
+        let model = LanguageModel {
             context_window: Some(40_000),
-            ..Model::new("fake", "test")
+            ..LanguageModel::new("fake", "test")
         };
         // 默认 80k 下限：40k 窗口不自动压缩。
         assert_eq!(
@@ -404,9 +404,9 @@ mod tests {
             Role::User,
             vec![ContentPart::text("x".repeat(200_000))],
         ));
-        let model = Model {
+        let model = LanguageModel {
             context_window: Some(100_000),
-            ..Model::new("fake", "test")
+            ..LanguageModel::new("fake", "test")
         };
         let config = CompactionConfig {
             enabled: false,

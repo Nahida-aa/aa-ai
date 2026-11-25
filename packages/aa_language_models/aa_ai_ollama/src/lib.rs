@@ -222,7 +222,7 @@ async fn read_text(
 impl aa_language_model::provider::LanguageModelClient for OllamaLanguageModelProvider {
     fn stream_completion(
         &self,
-        model: &aa_language_model::provider::Model,
+        model: &aa_language_model::provider::LanguageModel,
         request: &aa_language_model::request::Request,
     ) -> Pin<
         Box<
@@ -348,8 +348,8 @@ mod tests {
     use aa_language_model::provider::LanguageModelClient as _;
     use futures::StreamExt;
 
-    fn model(id: &str) -> aa_language_model::provider::Model {
-        aa_language_model::provider::Model::new("ollama", id)
+    fn model(id: &str) -> aa_language_model::provider::LanguageModel {
+        aa_language_model::provider::LanguageModel::new("ollama", id)
     }
 
     /// 测试专用传输：绕过环境变量代理，保证请求打到本地假端点。

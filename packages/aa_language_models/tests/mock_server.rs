@@ -27,8 +27,8 @@ mod support {
         )
     }
 
-    pub fn model() -> aa_language_model::provider::Model {
-        aa_language_model::provider::Model::new("mock", "mock")
+    pub fn model() -> aa_language_model::provider::LanguageModel {
+        aa_language_model::provider::LanguageModel::new("mock", "mock")
     }
 
     pub fn request(stream: bool) -> Request {

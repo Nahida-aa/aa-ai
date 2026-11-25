@@ -44,7 +44,7 @@
 //! ```
 //!
 //! 这就是「长尾兼容端点」那一档（[ADR 0008]）：端点、鉴权、额外 header 都是构造数据，
-//! 不需要写 crate；模型表由应用持有（库只接收 `provider::Model`）。有硬差异的常见厂商
+//! 不需要写 crate；模型表由应用持有（库只接收 `provider::LanguageModel`）。有硬差异的常见厂商
 //! （思考回放、`response_format` 范围、`[DONE]` 语义）仍各开 `aa_ai_<vendor>`。
 //!
 //! [ADR 0008]: ../../../docs/decisions/0008-provider-tiers.md
@@ -192,7 +192,7 @@ impl OpenAiLanguageModelProvider {
     /// 列出端点声明的模型（`GET {base_url}/models`）。
     ///
     /// 兼容端点的模型名一般只能从这里拿到；返回顺序即端点给的顺序。
-    /// 拿到 `id` 后填进 `aa_language_model::provider::Model::new(provider, id)`。
+    /// 拿到 `id` 后填进 `aa_language_model::provider::LanguageModel::new(provider, id)`。
     pub async fn list_models(
         &self,
     ) -> Result<Vec<crate::models::ModelInfo>, aa_language_model::provider::LlmError> {
@@ -270,7 +270,7 @@ async fn read_text(
 impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelProvider {
     fn stream_completion(
         &self,
-        model: &aa_language_model::provider::Model,
+        model: &aa_language_model::provider::LanguageModel,
         request: &aa_language_model::request::Request,
     ) -> Pin<
         Box<
@@ -284,7 +284,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
         >,
     > {
         // 先同步把借用式 wire DTO 写成 owned 字节；`'a` 到此终结，不进 future。
-        // 每请求选择（stream 等）来自 `Request`，静态能力位来自 `Model`（0006 D4 / A 方案）。
+        // 每请求选择（stream 等）来自 `Request`，静态能力位来自 `LanguageModel`（0006 D4 / A 方案）。
         let body = match crate::chat_completion::request::encode(request, model) {
             Ok(bytes) => bytes,
             Err(err) => return Box::pin(async move { Err(err) }),
@@ -457,8 +457,8 @@ mod tests {
     use aa_language_model::provider::LanguageModelClient as _;
     use futures::StreamExt;
 
-    fn make_model(id: &str) -> aa_language_model::provider::Model {
-        aa_language_model::provider::Model::new("openai", id)
+    fn make_model(id: &str) -> aa_language_model::provider::LanguageModel {
+        aa_language_model::provider::LanguageModel::new("openai", id)
     }
 
     /// 测试专用传输：绕过环境变量代理，保证请求打到本地假端点。
@@ -586,7 +586,7 @@ mod tests {
     /// 一条 user 消息 → 编码后的 wire body。
     fn encode_user(
         parts: Vec<aa_language_model::request::message::ContentPart>,
-        model: &aa_language_model::provider::Model,
+        model: &aa_language_model::provider::LanguageModel,
     ) -> serde_json::Value {
         let req = aa_language_model::request::Request {
             messages: vec![Arc::new(aa_language_model::request::message::Message::new(
@@ -1106,5 +1106,91 @@ mod tests {
             provider.headers(),
             Err(aa_language_model::provider::LlmError::Transport(_))
         ));
+    }
+
+    /// 结构化输出能力位默认关闭：请求带了就直接拒绝，不静默丢弃。
+    #[test]
+    fn rejects_response_format_when_capability_is_off() {
+        use aa_language_model::request::{Request, ResponseFormat};
+
+        let request = Request {
+            response_format: Some(ResponseFormat::JsonObject),
+            ..Default::default()
+        };
+        let err = crate::chat_completion::request::to_chat_completion_request(
+            &request,
+            &make_model("gpt-test"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            aa_language_model::provider::LlmError::Unsupported(_)
+        ));
+    }
+
+    /// 只开了 `json_schema` 没开 `strict` 时，`strict: true` 的请求仍应被拒绝。
+    #[test]
+    fn rejects_strict_schema_without_strict_capability() {
+        use aa_language_model::request::{Request, ResponseFormat};
+
+        let request = Request {
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "person".to_owned(),
+                schema: serde_json::json!({"type": "object"}),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let mut model = make_model("gpt-test");
+        model.response_format_support = aa_language_model::provider::ResponseFormatSupport {
+            json_object: false,
+            json_schema: true,
+            strict: false,
+        };
+
+        let err = crate::chat_completion::request::to_chat_completion_request(&request, &model)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            aa_language_model::provider::LlmError::Unsupported(_)
+        ));
+    }
+
+    /// 能力位开启后，`JsonSchema` 要按 OpenAI 的 `json_schema` 信封编码。
+    #[test]
+    fn encodes_json_schema_response_format_when_supported() {
+        use aa_language_model::request::{Request, ResponseFormat};
+
+        let request = Request {
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "person".to_owned(),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                    "additionalProperties": false,
+                }),
+                strict: true,
+            }),
+            ..Default::default()
+        };
+        let mut model = make_model("gpt-test");
+        model.response_format_support = aa_language_model::provider::ResponseFormatSupport {
+            json_object: true,
+            json_schema: true,
+            strict: true,
+        };
+
+        let body =
+            crate::chat_completion::request::to_chat_completion_request(&request, &model).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+
+        assert_eq!(json["response_format"]["type"], "json_schema");
+        assert_eq!(json["response_format"]["json_schema"]["name"], "person");
+        assert_eq!(json["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(
+            json["response_format"]["json_schema"]["schema"]["required"][0],
+            "name"
+        );
     }
 }

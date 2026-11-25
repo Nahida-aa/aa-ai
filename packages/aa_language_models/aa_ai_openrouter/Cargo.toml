@@ -19,3 +19,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
+aa_reqwest_client.workspace = true

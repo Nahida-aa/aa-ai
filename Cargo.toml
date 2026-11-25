@@ -22,7 +22,9 @@ aa_ai_openai = { path = "packages/aa_language_models/aa_ai_openai" }
 aa_ai_openrouter = { path = "packages/aa_language_models/aa_ai_openrouter" }
 aa_ai_ollama = { path = "packages/aa_language_models/aa_ai_ollama" }
 # 共享传输在 aa-stack（不是 aa-ai）：它不认识 LLM 类型，以后可能独立到 aa-util。
+# `aa_http_client` = 接口，`aa_reqwest_client` = reqwest 实现与 builder。
 aa_http_client = { path = "../aa-stack/packages/util/aa_http_client" }
+aa_reqwest_client = { path = "../aa-stack/packages/util/aa_reqwest_client" }
 
 futures = "0.3"
 # 用系统信任库（rustls-native-certs）而不是内置 webpki-roots：企业/本地代理
@@ -31,6 +33,6 @@ reqwest = { version = "0.12", default-features = false, features = ["http2", "js
 schemars = "0.8"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

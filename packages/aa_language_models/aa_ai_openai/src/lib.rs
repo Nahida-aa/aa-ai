@@ -28,7 +28,7 @@
 //!
 //! // 一个进程一个连接池：应用构造一次，所有 provider 共享。
 //! let http: Arc<dyn aa_http_client::HttpClient> =
-//!     aa_http_client::builder().build()?;
+//!     Arc::new(aa_reqwest_client::builder().build()?);
 //!
 //! let provider = OpenAiLanguageModelProvider::new(http.clone(), "sk-...")
 //!     .with_base_url("https://api.example.com/v1")
@@ -65,7 +65,7 @@
 //! 本 crate **不拥有** HTTP 客户端：一个进程一个连接池，由调用方构造
 //! `Arc<dyn aa_http_client::HttpClient>` 后传进来（见
 //! [`docs/decisions/0010-transport-object.md`](../../../docs/decisions/0010-transport-object.md)）。
-//! 超时/keep-alive/代理策略都在 `aa_http_client`（对齐 Zed `ReqwestClient::builder`）：
+//! 超时/keep-alive/代理策略都在 `aa_reqwest_client`（对齐 Zed `ReqwestClient::builder`）：
 //! 10s 建连、30s TCP keep-alive / 连接池空闲回收、HTTP/2 keep-alive 15s/10s、
 //! 120s per-read idle 超时（收到任何字节就重置，不是整请求总时长）。
 //!
@@ -459,11 +459,11 @@ mod tests {
 
     /// 测试专用传输：绕过环境变量代理，保证请求打到本地假端点。
     fn direct_http(read_timeout: Option<Duration>) -> Arc<dyn aa_http_client::HttpClient> {
-        let mut builder = aa_http_client::builder().proxy(aa_http_client::Proxy::Direct);
+        let mut builder = aa_reqwest_client::builder().proxy(aa_http_client::Proxy::Direct);
         if let Some(timeout) = read_timeout {
             builder = builder.read_timeout(timeout);
         }
-        builder.build().expect("测试用 HTTP 客户端必须能构造")
+        Arc::new(builder.build().expect("测试用 HTTP 客户端必须能构造"))
     }
 
     #[test]

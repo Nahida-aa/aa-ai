@@ -24,7 +24,7 @@
 //! use aa_ai_openrouter::OpenRouterLanguageModelProvider;
 //!
 //! let http: Arc<dyn aa_http_client::HttpClient> =
-//!     aa_http_client::builder().build()?;
+//!     Arc::new(aa_reqwest_client::builder().build()?);
 //! let provider = OpenRouterLanguageModelProvider::new(http, "sk-or-...")
 //!     .with_app_title("my-app")
 //!     .with_app_url("https://app.example.com");
@@ -382,11 +382,15 @@ fn sse_event_stream(reader: aa_http_client::AsyncBody) -> aa_language_model::pro
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     fn provider() -> super::OpenRouterLanguageModelProvider {
-        let http = aa_http_client::builder()
-            .proxy(aa_http_client::Proxy::Direct)
-            .build()
-            .unwrap();
+        let http = Arc::new(
+            aa_reqwest_client::builder()
+                .proxy(aa_http_client::Proxy::Direct)
+                .build()
+                .unwrap(),
+        );
         super::OpenRouterLanguageModelProvider::new(http, "sk-or-test")
             .with_app_url("https://example.com")
             .with_app_title("aacode")
@@ -415,10 +419,12 @@ mod tests {
 
     #[test]
     fn attribution_headers_are_optional() {
-        let http = aa_http_client::builder()
-            .proxy(aa_http_client::Proxy::Direct)
-            .build()
-            .unwrap();
+        let http = Arc::new(
+            aa_reqwest_client::builder()
+                .proxy(aa_http_client::Proxy::Direct)
+                .build()
+                .unwrap(),
+        );
         let provider = super::OpenRouterLanguageModelProvider::new(http, "sk-or-test");
         let headers = provider.headers().unwrap();
         assert!(!headers.contains_key("http-referer"));

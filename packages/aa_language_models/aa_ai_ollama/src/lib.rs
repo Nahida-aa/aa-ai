@@ -17,7 +17,7 @@
 //! use aa_ai_ollama::OllamaLanguageModelProvider;
 //!
 //! let http: Arc<dyn aa_http_client::HttpClient> =
-//!     aa_http_client::builder().build()?;
+//!     Arc::new(aa_reqwest_client::builder().build()?);
 //! let ollama = OllamaLanguageModelProvider::new(http)
 //!     .with_base_url("http://localhost:11434");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -350,10 +350,12 @@ mod tests {
 
     /// 测试专用传输：绕过环境变量代理，保证请求打到本地假端点。
     fn direct_http() -> Arc<dyn aa_http_client::HttpClient> {
-        aa_http_client::builder()
-            .proxy(aa_http_client::Proxy::Direct)
-            .build()
-            .expect("测试用 HTTP 客户端必须能构造")
+        Arc::new(
+            aa_reqwest_client::builder()
+                .proxy(aa_http_client::Proxy::Direct)
+                .build()
+                .expect("测试用 HTTP 客户端必须能构造"),
+        )
     }
 
     fn user_request(stream: bool) -> aa_language_model::request::Request {

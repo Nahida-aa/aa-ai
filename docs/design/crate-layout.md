@@ -92,9 +92,9 @@ aa_agent ──> aa_language_model
 `google_ai`（各自一个 crate）分离，DeepSeek 这种「大体兼容但字段不同」的也照样
 新开 crate，而不是塞进 core。
 
-## 3. 命名：命名空间 + 短类型名 + **完整路径**
+## 3. 命名：完整路径 + 易混公共类型加长名
 
-**规则（用户规定）：类型名短，域用模块路径表达；路径必须完整，不允许 `use` 导入后再写短路径。**
+**规则（用户规定）：类型名默认短，域用模块路径表达；路径必须完整，不允许 `use` 导入后再写短路径。跨 crate 的公共类型若短名易混、或在 AI 检索中容易被省掉命名空间，则改用与 Zed 同名的长名（2026-11-26 用户决定）。**
 
 | 做法 | 例子 | 结论 |
 |---|---|---|
@@ -102,7 +102,8 @@ aa_agent ──> aa_language_model
 | 同 crate 内写完整路径 | `crate::chat_completion::request::message::ChatMessage` | ✅ |
 | 导入模块，写 `模块::类型` | `use aa_language_model::request;` → `request::Request` | ❌ 前缀被截断 |
 | 导入具体类型后用裸名 | `use aa_language_model::request::Request;` → `Request` | ❌ 完全丢命名空间 |
-| 用长前缀把域写进类型名 | `LanguageModelRequest` / `LanguageModelRequestMessage` | ❌ |
+| 易混公共类型用长名 | `LanguageModelToolUseInput` / `LanguageModelRequestToolInput` | ✅ |
+| 给所有类型无差别加长前缀 | `LanguageModelRequestMessage` | ❌ 只为区分而加，徒增改名成本 |
 
 正例：
 
@@ -136,10 +137,13 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
 - 读代码时**不必回到文件头确认 `use`**：`aa_language_model::request::message::ContentPart`
   自带全部归属信息。跨 crate 阅读（grep 结果、diff、文档片段）时尤其重要。
 - 短名 + 模块路径在调用点自带上下文，又不用把域写进类型名。
-- 长前缀（`LanguageModelRequestMessage`）把域固化成类型名的一部分，改名就要全仓替换，
-  且和 Zed 的名字纠缠在一起。
-- 裸名在同一个文件里出现两个 `ToolInput`（`message::ToolInput` ≠ `tools::ToolInput`）时
-  尤其危险。
+- 但 AI/搜索场景经常只写裸名：`ToolInput` 在 grep 结果里分不清是工具定义还是工具调用，
+  因此这类**易混、跨 crate 的公共类型**改用长名：
+  `LanguageModelToolUseInput`（调用参数）≠ `LanguageModelRequestToolInput`（工具定义）。
+  同理 `LanguageModelCompletionEvent`。
+- 长名带来的改名成本只在被选中的少数类型上；不搞“全量加前缀”。
+- 裸名在同一个文件里出现两个输入类型（`LanguageModelToolUseInput` ≠ `LanguageModelRequestToolInput`）时
+  尤其危险——这也是它们必须用长名的直接原因。
 - 断言：
 
   ```bash
@@ -211,7 +215,7 @@ fn draw(req: &Request) {}                          // ❌ 看不出是哪个域
 | 允许对 `packages/` 破坏性重构 | 用户规定 |
 | 配置文件 / 凭证 / 模型表归应用层，库只接收已解好的数据 | 用户规定（2026-11-19）；见 [`library-api.md`](library-api.md) |
 | `Model` 只放模型事实，厂商差异放厂商 crate | 助手提案（0008 D2） |
-| `CompletionEvent::Reasoning` | 助手提案（0008 D3），对齐 Zed `Thinking` |
+| `LanguageModelCompletionEvent::Reasoning` | 助手提案（0008 D3），对齐 Zed `Thinking` |
 | 语义 IR + per-provider wire + 统一事件流 | 对比结论（Zed / genai / rig 三者收敛） |
 | enum 表达封闭语义、`dyn` 表达开放实现 | 对比结论（Zed 的穷尽匹配优势） |
 | 借用式 encoder（不重建 owned 历史） | 对比结论 + 实测（`decisions/experiments/history-bytes`） |

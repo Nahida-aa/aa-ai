@@ -26,6 +26,10 @@
 | [`http-client.md`](http-client.md) | 四家的 HTTP 客户端：代理解析、`NO_PROXY`、连接/读取超时、流式 idle 超时的实现位置 |
 | [`ollama-wire.md`](ollama-wire.md) | Ollama 原生 `/api/chat` 与 OpenAI chat completions 的逐字段差异（NDJSON、`thinking`、`tool_name`、`done_reason`） |
 | [`openrouter-wire.md`](openrouter-wire.md) | OpenRouter 与 OpenAI chat completions 的逐字段差异（`reasoning`/`reasoning_details`、数字错误码、流内错误、`pricing`、限流） |
+| [`agent-loop-abort.md`](agent-loop-abort.md) | agent loop 的取消：层级、传播方向、会话收尾；Zed / rig / TanStack / pi / dsh 对照 + `CancelToken` 提案 |
+| [`agent-loop.md`](agent-loop.md) | agent loop 本身的结构对比：状态所有权、turn/step、工具并发、终止、持久化、压缩、子 agent；六家逐项对照 |
+| [`agent-loop-output.md`](agent-loop-output.md) | agent loop 的输出结构：终止返回值、终态 schema 约束、工具参数不合法时的处理、压缩产物；Zed / rig / TanStack / pi / dsh / aa-ai |
+| [`tool-input-invalid.md`](tool-input-invalid.md) | 工具输入不合法时的处理：查找时机、是否执行、错误去向、修复与终止；Zed / rig / TanStack / opencode / pi / dsh / aa-ai |
 
 ## 源码克隆与 commit
 

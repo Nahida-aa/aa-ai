@@ -8,7 +8,7 @@
 > [`docs/design/crate-layout.md`](../design/crate-layout.md)（布局现行规则）
 >
 > **归属：分层方式（协议 / 常见厂商 / 长尾）与「常见厂商一家一个 crate」是用户决定
-> （2026-11-17）；「`Model` 只放模型事实」「补 `CompletionEvent::Reasoning`」是助手提案，
+> （2026-11-17）；「`Model` 只放模型事实」「补 `LanguageModelCompletionEvent::Reasoning`」是助手提案，
 > 依据是四家源码对照与本仓现有字段的错位。**
 
 ## 背景与问题
@@ -24,7 +24,7 @@
 | 固定 `Authorization: Bearer` + `/chat/completions` | Azure 用 `api-key` header + 部署路由；OpenRouter 要 `HTTP-Referer` / `X-Title` |
 | `usage` 只读 `prompt_tokens` | Groq 在 `chunk.x_groq.usage`；DeepSeek/OpenRouter 还有 cache token |
 
-同时 IR 侧缺一件事：`ContentPart::Reasoning` 早就存在（0005），但 `CompletionEvent`
+同时 IR 侧缺一件事：`ContentPart::Reasoning` 早就存在（0005），但 `LanguageModelCompletionEvent`
 没有对应增量，provider 即使解析出思考也无处可去，agent loop 存不进历史。
 
 **核心问题不是「怎么接自定义端点」，而是「常见厂商的差异写在哪」。** 之前把
@@ -121,10 +121,10 @@ pub struct Model {
 
 判断标准：**换一个模型就会变** → 放 `Model`；**换一个厂商才会变** → 放厂商 crate。
 
-### D3. `CompletionEvent` 增加 `Reasoning`
+### D3. `LanguageModelCompletionEvent` 增加 `Reasoning`
 
 ```rust
-pub enum CompletionEvent {
+pub enum LanguageModelCompletionEvent {
     Text(String),
     Reasoning { text: String, signature: Option<String> },  // 新
     ToolUse { id: String, name: String, input: serde_json::Value, is_complete: bool },
@@ -133,7 +133,7 @@ pub enum CompletionEvent {
 }
 ```
 
-- 对齐 Zed `LanguageModelCompletionEvent::Thinking { text, signature }`。
+- 对齐 Zed `LanguageModelLanguageModelCompletionEvent::Thinking { text, signature }`。
 - `signature` 只有 Anthropic 这类要求回放签名的 provider 才有值，其余为 `None`；
   文本与签名可能落在不同增量，由 provider 合并。
 - agent loop 把思考累加后，**按「Reasoning → Text → ToolCall」顺序**写入 assistant
@@ -189,7 +189,7 @@ OpenAiLanguageModelProvider::without_auth()        // 非 Bearer 鉴权（Azure 
 - header 在进入 future 之前同步构造，非法名字/值返回 `LlmError::Transport`，不 panic；
 - `new("")` 会发空的 `Bearer `，所以「无鉴权」必须用 `without_auth()`（写进文档）；
 - **兼容端点的思考**：响应 DTO 同时认 `reasoning_content` / `reasoning` /
-  `reasoning_text`，映射成 `CompletionEvent::Reasoning`（依据 TanStack
+  `reasoning_text`，映射成 `LanguageModelCompletionEvent::Reasoning`（依据 TanStack
   `ai-openai/src/compatible/adapter.ts:52`）。这三个字段出现在 OpenAI 形状的同一位置，
   属于兼容端点的扩展，不改变 `aa_ai_openai` 的请求形状；
 - **回放仍不在这一层**：把思考写回下一轮 assistant 消息（DeepSeek 要求）留给厂商 crate；

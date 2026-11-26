@@ -33,7 +33,7 @@
 enum ContentPart {
     Text(Arc<str>),
     Reasoning { text: Arc<str>, signature: Option<Arc<str>>, .. },
-    ToolCall { id: Arc<str>, name: Arc<str>, input: ToolInput },
+    ToolCall { id: Arc<str>, name: Arc<str>, input: LanguageModelToolUseInput },
     ..
 }
 

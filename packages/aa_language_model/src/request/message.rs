@@ -112,7 +112,7 @@ pub enum ContentPart {
     ToolCall {
         id: Arc<str>,
         name: Arc<str>,
-        input: ToolInput,
+        input: LanguageModelToolUseInput,
     },
     /// 工具执行结果，回填给模型。一条消息可以带多个结果（并行工具调用）。
     ///
@@ -141,7 +141,7 @@ impl ContentPart {
     pub fn tool_call(
         id: impl Into<Arc<str>>,
         name: impl Into<Arc<str>>,
-        input: impl Into<ToolInput>,
+        input: impl Into<LanguageModelToolUseInput>,
     ) -> Self {
         Self::ToolCall {
             id: id.into(),
@@ -167,14 +167,15 @@ impl ContentPart {
 ///
 /// 正常是 JSON；某些模型（或解析失败时）给的是纯文本 / 未完成的 JSON 片段。
 /// `Value` 装箱是为了把 `ContentPart` 压在上限内。
-#[derive(Debug, Clone, PartialEq)]
-pub enum ToolInput {
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum LanguageModelToolUseInput {
     Json(Box<serde_json::Value>),
     /// 原始文本（非 JSON，或 provider 流式给到一半的片段）。
     Text(Arc<str>),
 }
 
-impl ToolInput {
+impl LanguageModelToolUseInput {
     pub fn as_value(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Json(value) => Some(value),
@@ -191,13 +192,13 @@ impl ToolInput {
     }
 }
 
-impl From<serde_json::Value> for ToolInput {
+impl From<serde_json::Value> for LanguageModelToolUseInput {
     fn from(value: serde_json::Value) -> Self {
         Self::Json(Box::new(value))
     }
 }
 
-impl From<&str> for ToolInput {
+impl From<&str> for LanguageModelToolUseInput {
     fn from(value: &str) -> Self {
         Self::Text(Arc::from(value))
     }
@@ -366,11 +367,11 @@ mod tests {
 
     #[test]
     fn tool_input_wire_string() {
-        let json = ToolInput::from(serde_json::json!({"path": "a.rs"}));
+        let json = LanguageModelToolUseInput::from(serde_json::json!({"path": "a.rs"}));
         assert_eq!(json.to_wire_string(), "{\"path\":\"a.rs\"}");
         assert_eq!(json.as_value().unwrap()["path"], "a.rs");
 
-        let raw = ToolInput::from("{not json");
+        let raw = LanguageModelToolUseInput::from("{not json");
         assert_eq!(raw.to_wire_string(), "{not json");
         assert!(raw.as_value().is_none());
     }

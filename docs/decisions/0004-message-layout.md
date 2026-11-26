@@ -118,7 +118,7 @@ pub enum ContentPart {
     ToolCall {                                                       // 48B
         id: Arc<str>,
         name: Arc<str>,
-        input: ToolInput,          // enum，内含 Arc<str> 或 Box<Value>
+        input: LanguageModelToolUseInput,          // enum，内含 Arc<str> 或 Box<Value>
     },
     ToolResult {                                                     // 32B
         call_id: Arc<str>,

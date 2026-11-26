@@ -23,7 +23,7 @@
 packages/
   aa_language_model/                  IR + trait，零网络依赖
     request/    request::Request / request::message::* / request::tools::*
-    provider/   provider::LanguageModelClient / LlmError / CompletionEvent
+    provider/   provider::LanguageModelClient / LlmError / LanguageModelCompletionEvent
     fake.rs     离线替身（fake feature）
   aa_language_models/
     aa_ai_openai/       OpenAI wire DTO + encoder + HTTP 客户端（依赖 reqwest）

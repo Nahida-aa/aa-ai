@@ -287,8 +287,10 @@ pub fn to_chat_request<'a>(
 
     let mut tools = Vec::with_capacity(request.tools.len());
     for tool in &request.tools {
-        let aa_language_model::request::tools::ToolInput::Function { input_schema, .. } =
-            &tool.input
+        let aa_language_model::request::tools::LanguageModelRequestToolInput::Function {
+            input_schema,
+            ..
+        } = &tool.input
         else {
             return Err(aa_language_model::provider::LlmError::Unsupported(
                 "Ollama 只支持 function 工具（JSON Schema），不支持 custom 工具".to_owned(),
@@ -396,11 +398,11 @@ fn push_text<'a>(text: &mut Cow<'a, str>, has_text: &mut bool, part: &'a str) {
 
 /// 工具入参：Ollama 要对象。非 JSON 的入参（模型给半截文本）无法表达 → 报错。
 fn tool_arguments(
-    input: &aa_language_model::request::message::ToolInput,
+    input: &aa_language_model::request::message::LanguageModelToolUseInput,
 ) -> Result<&serde_json::Value, aa_language_model::provider::LlmError> {
     match input {
-        aa_language_model::request::message::ToolInput::Json(value) => Ok(value),
-        aa_language_model::request::message::ToolInput::Text(text) => {
+        aa_language_model::request::message::LanguageModelToolUseInput::Json(value) => Ok(value),
+        aa_language_model::request::message::LanguageModelToolUseInput::Text(text) => {
             Err(aa_language_model::provider::LlmError::Unsupported(format!(
                 "Ollama 的工具参数必须是 JSON 对象，这条历史里是纯文本：{text:?}"
             )))
@@ -812,7 +814,9 @@ mod tests {
             tools: vec![Arc::new(aa_language_model::request::tools::Tool {
                 name: "t".to_owned(),
                 description: "d".to_owned(),
-                input: aa_language_model::request::tools::ToolInput::Custom { format: None },
+                input: aa_language_model::request::tools::LanguageModelRequestToolInput::Custom {
+                    format: None,
+                },
             })],
             ..Default::default()
         };

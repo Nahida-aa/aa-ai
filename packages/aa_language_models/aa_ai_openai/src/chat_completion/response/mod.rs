@@ -1,16 +1,16 @@
 //! chat completions 的**响应** wire 形状：非流式 body、流式 chunk、错误 body，
-//! 以及把两者都翻成 canonical `CompletionEvent` 的映射层。
+//! 以及把两者都翻成 canonical `LanguageModelCompletionEvent` 的映射层。
 //!
 //! 依据 [`docs/decisions/0007-response-mapping.md`](../../../../../docs/decisions/0007-response-mapping.md)：
 //! - `finish_reason` 是 `StopReason` 的唯一权威来源，不再按「有没有 tool_calls」猜；
-//! - `usage` 映射成 `CompletionEvent::Usage`（流式时来自带 `include_usage` 的最后一帧）；
+//! - `usage` 映射成 `LanguageModelCompletionEvent::Usage`（流式时来自带 `include_usage` 的最后一帧）；
 //! - 非 2xx / 流内 `{"error":...}` 都抽 `error.message`，不再把整个 body 塞进错误；
 //! - 流式用 `text/event-stream`：`data: {...}` 逐帧解析，`[DONE]` 收尾。
 //!
 //! **兼容端点的思考字段**：OpenAI 官方 chat completions 不返回思考，但大量
 //! OpenAI 兼容端点在同一位置塞 `reasoning_content`（DeepSeek / Qwen / GLM / Kimi /
 //! 多数 vLLM、SGLang）、`reasoning`（部分网关）、`reasoning_text`（GitHub Copilot）。
-//! 这里把三者都映射成 `CompletionEvent::Reasoning`，字段缺失的纯 OpenAI 端点不受影响。
+//! 这里把三者都映射成 `LanguageModelCompletionEvent::Reasoning`，字段缺失的纯 OpenAI 端点不受影响。
 //! 参照 TanStack `ai-openai/src/compatible/adapter.ts:52` 的 `extractReasoning`。
 //! **回放**（把思考写回下一轮 assistant 消息）不属于 OpenAI 形状，留在厂商 crate。
 //!
@@ -294,43 +294,64 @@ struct PendingToolCall {
 }
 
 impl ToolCalls {
-    fn absorb(&mut self, delta: &DeltaToolCall) {
+    /// 吸收一个增量；参数有增长时返回该调用的当前快照（id、name、累计参数原文）。
+    fn absorb(&mut self, delta: &DeltaToolCall) -> Option<(String, String, String)> {
         let call = self.calls.entry(delta.index).or_default();
         if let Some(id) = &delta.id
             && !id.is_empty()
         {
             call.id = id.clone();
         }
+        let mut grew = false;
         if let Some(function) = &delta.function {
             if let Some(name) = &function.name
                 && !name.is_empty()
             {
                 call.name = name.clone();
             }
-            if let Some(arguments) = &function.arguments {
+            if let Some(arguments) = &function.arguments
+                && !arguments.is_empty()
+            {
                 call.arguments.push_str(arguments);
+                grew = true;
             }
         }
+        grew.then(|| (call.id.clone(), call.name.clone(), call.arguments.clone()))
     }
 
     /// 取出并清空全部调用（`finish_reason` 到达时调用一次）。
-    fn drain(&mut self) -> Vec<aa_language_model::provider::CompletionEvent> {
-        use aa_language_model::provider::CompletionEvent;
+    fn drain(&mut self) -> Vec<aa_language_model::provider::LanguageModelCompletionEvent> {
+        use aa_language_model::provider::LanguageModelCompletionEvent;
         std::mem::take(&mut self.calls)
             .into_values()
-            .map(|call| CompletionEvent::ToolUse {
+            .map(|call| LanguageModelCompletionEvent::ToolUse {
                 id: call.id,
                 name: call.name,
-                // 参数是增量拼起来的 JSON 文本；解析失败保留原文，不吞掉模型输出。
-                input: serde_json::from_str(&call.arguments)
-                    .unwrap_or(serde_json::Value::String(call.arguments)),
+                // 参数是增量拼起来的 JSON 文本；解析失败保留原文，交给工具层报错。
+                // 空串按 Zed 的约定当作空对象（无参数工具）。
+                input: if call.arguments.is_empty() {
+                    serde_json::json!({}).into()
+                } else {
+                    match serde_json::from_str(&call.arguments) {
+                        Ok(value) => {
+                            aa_language_model::request::message::LanguageModelToolUseInput::Json(
+                                Box::new(value),
+                            )
+                        }
+                        Err(_) => {
+                            aa_language_model::request::message::LanguageModelToolUseInput::Text(
+                                call.arguments.into(),
+                            )
+                        }
+                    }
+                },
                 is_complete: true,
             })
             .collect()
     }
 }
 
-/// 流式解码器：`bytes` → `CompletionEvent`。
+/// 流式解码器：`bytes` → `LanguageModelCompletionEvent`。
 ///
 /// 独立于 HTTP 层，便于单测（见本模块测试）：喂字节、拿事件，不需要起服务器。
 #[derive(Debug, Default)]
@@ -349,7 +370,10 @@ impl StreamDecoder {
         &mut self,
         chunk: &[u8],
     ) -> Vec<
-        Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
+        Result<
+            aa_language_model::provider::LanguageModelCompletionEvent,
+            aa_language_model::provider::LlmError,
+        >,
     > {
         self.sse.push(chunk);
         let mut out = Vec::new();
@@ -366,7 +390,10 @@ impl StreamDecoder {
     pub fn finish(
         mut self,
     ) -> Vec<
-        Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
+        Result<
+            aa_language_model::provider::LanguageModelCompletionEvent,
+            aa_language_model::provider::LlmError,
+        >,
     > {
         if self.stopped || self.done {
             Vec::new()
@@ -381,18 +408,18 @@ impl StreamDecoder {
         data: &[u8],
         out: &mut Vec<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,
     ) {
-        use aa_language_model::provider::CompletionEvent;
+        use aa_language_model::provider::LanguageModelCompletionEvent;
 
         if data == b"[DONE]" {
             // 正常收尾：provider 没给 finish_reason 时补一个 EndTurn，避免上层空等。
             if !self.stopped {
                 self.stopped = true;
-                out.push(Ok(CompletionEvent::Stop(
+                out.push(Ok(LanguageModelCompletionEvent::Stop(
                     aa_language_model::provider::StopReason::EndTurn,
                 )));
             }
@@ -427,7 +454,7 @@ impl StreamDecoder {
         for choice in &chunk.choices {
             // 兼容端点的思考增量先于文本（DeepSeek 等按这个顺序发）。
             if let Some(reasoning) = choice.delta.reasoning() {
-                out.push(Ok(CompletionEvent::Reasoning {
+                out.push(Ok(LanguageModelCompletionEvent::Reasoning {
                     text: reasoning.to_owned(),
                     signature: None,
                 }));
@@ -435,10 +462,27 @@ impl StreamDecoder {
             if let Some(content) = &choice.delta.content
                 && !content.is_empty()
             {
-                out.push(Ok(CompletionEvent::Text(content.clone())));
+                out.push(Ok(LanguageModelCompletionEvent::Text(content.clone())));
             }
             for call in &choice.delta.tool_calls {
-                self.calls.absorb(call);
+                // 参数还在生成：修补后能解析才发一个 `is_complete: false` 的快照，
+                // 让支持流式的工具提前开工、UI 边收边看；解析不出来就继续等。
+                // 快照的值可能被截断，最终结果永远以完整事件为准。
+                if let Some((id, name, arguments)) = self.calls.absorb(call)
+                    && !id.is_empty()
+                    && !name.is_empty()
+                    && let Some(value) =
+                        aa_language_model::provider::parse_streamed_json(&arguments)
+                {
+                    out.push(Ok(LanguageModelCompletionEvent::ToolUse {
+                        id,
+                        name,
+                        input: aa_language_model::request::message::LanguageModelToolUseInput::Json(
+                            Box::new(value),
+                        ),
+                        is_complete: false,
+                    }));
+                }
             }
             if let Some(finish_reason) = choice.finish_reason.as_deref() {
                 // 先吐工具调用，再吐 Stop：agent loop 按事件顺序攒 would-be 调用。
@@ -446,7 +490,7 @@ impl StreamDecoder {
                     out.push(Ok(event));
                 }
                 self.stopped = true;
-                out.push(Ok(CompletionEvent::Stop(
+                out.push(Ok(LanguageModelCompletionEvent::Stop(
                     stop_reason(Some(finish_reason))
                         .unwrap_or(aa_language_model::provider::StopReason::EndTurn),
                 )));
@@ -454,21 +498,23 @@ impl StreamDecoder {
         }
 
         if let Some(usage) = chunk.usage {
-            out.push(Ok(CompletionEvent::Usage(usage.to_canonical())));
+            out.push(Ok(LanguageModelCompletionEvent::Usage(
+                usage.to_canonical(),
+            )));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use aa_language_model::provider::CompletionEvent;
+    use aa_language_model::provider::LanguageModelCompletionEvent;
     use aa_language_model::provider::StopReason;
 
     use super::StreamDecoder;
 
     fn decode(
         chunks: &[&str],
-    ) -> Vec<Result<CompletionEvent, aa_language_model::provider::LlmError>> {
+    ) -> Vec<Result<LanguageModelCompletionEvent, aa_language_model::provider::LlmError>> {
         let mut decoder = StreamDecoder::default();
         let mut out = Vec::new();
         for chunk in chunks {
@@ -490,9 +536,9 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Text("Hel".into()),
-                CompletionEvent::Text("lo".into()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("Hel".into()),
+                LanguageModelCompletionEvent::Text("lo".into()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -512,20 +558,45 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "thin".into(),
                     signature: None,
                 },
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "king".into(),
                     signature: None,
                 },
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "!".into(),
                     signature: None,
                 },
-                CompletionEvent::Text("hi".into()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("hi".into()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_tool_arguments_are_kept_as_text() {
+        let events = decode(&[
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"not json\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]);
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        assert_eq!(
+            events,
+            vec![
+                // 修补后仍解析不出来：不发流式快照，只等最终判定。
+                LanguageModelCompletionEvent::ToolUse {
+                    id: "call_a".into(),
+                    name: "read_file".into(),
+                    input: aa_language_model::request::message::LanguageModelToolUseInput::Text(
+                        "not json".into()
+                    ),
+                    is_complete: true,
+                },
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
     }
@@ -544,12 +615,12 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "think".into(),
                     signature: None,
                 },
-                CompletionEvent::Text("answer".into()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("answer".into()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -569,21 +640,35 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::ToolUse {
+                // 第一段 `{"pa` 修补后仍不合法，等第二段；第二段补齐后才发快照。
+                partial("call_a", "read_file", serde_json::json!({"path": "a"})),
+                // call_b 的第二段同样补齐 `{"dir":"."}` 后才可解析。
+                partial("call_b", "list_dir", serde_json::json!({"dir": "."})),
+                LanguageModelCompletionEvent::ToolUse {
                     id: "call_a".into(),
                     name: "read_file".into(),
-                    input: serde_json::json!({"path": "a"}),
+                    input: serde_json::json!({"path": "a"}).into(),
                     is_complete: true,
                 },
-                CompletionEvent::ToolUse {
+                LanguageModelCompletionEvent::ToolUse {
                     id: "call_b".into(),
                     name: "list_dir".into(),
-                    input: serde_json::json!({"dir": "."}),
+                    input: serde_json::json!({"dir": "."}).into(),
                     is_complete: true,
                 },
-                CompletionEvent::Stop(StopReason::ToolUse),
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
+    }
+
+    /// 流式生成中的已修补快照事件。
+    fn partial(id: &str, name: &str, value: serde_json::Value) -> LanguageModelCompletionEvent {
+        LanguageModelCompletionEvent::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: value.into(),
+            is_complete: false,
+        }
     }
 
     #[test]
@@ -597,7 +682,7 @@ mod tests {
         let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
         assert_eq!(
             events.last(),
-            Some(&CompletionEvent::Usage(
+            Some(&LanguageModelCompletionEvent::Usage(
                 aa_language_model::provider::TokenUsage {
                     input_tokens: 12,
                     output_tokens: 3,
@@ -615,7 +700,7 @@ mod tests {
         let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
         assert_eq!(
             events.last(),
-            Some(&CompletionEvent::Stop(StopReason::MaxTokens))
+            Some(&LanguageModelCompletionEvent::Stop(StopReason::MaxTokens))
         );
     }
 
@@ -628,7 +713,10 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
         ]);
         let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
-        assert_eq!(events[0], CompletionEvent::Text("split".into()));
+        assert_eq!(
+            events[0],
+            LanguageModelCompletionEvent::Text("split".into())
+        );
     }
 
     #[test]
@@ -640,7 +728,7 @@ mod tests {
             "data: [DONE]\r\n\r\n",
         ]);
         let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
-        assert_eq!(events[0], CompletionEvent::Text("ok".into()));
+        assert_eq!(events[0], LanguageModelCompletionEvent::Text("ok".into()));
     }
 
     #[test]

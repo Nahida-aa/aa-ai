@@ -6,7 +6,7 @@
 //!   mock 端点，让 CLI / reqwest 链路可以离线跑。
 //!
 //! 生成的是「形状正确」的最小 body：信封字段（`id` / `object` / `created`）
-//! 固定成 mock 值，解码器本来就不读它们。所有函数只依赖 `CompletionEvent`，
+//! 固定成 mock 值，解码器本来就不读它们。所有函数只依赖 `LanguageModelCompletionEvent`，
 //! 不依赖请求侧结构。
 //!
 //! 事件顺序会被轻微归一化，与真实端点一致：
@@ -15,29 +15,29 @@
 //! - `Stop` 之后补 `data: [DONE]`；没有 `Stop` 时补一个 `stop` 收尾，
 //!   避免解码器报 `StreamEnded`。
 
-use aa_language_model::provider::{CompletionEvent, StopReason};
+use aa_language_model::provider::{LanguageModelCompletionEvent, StopReason};
 
 const MODEL: &str = "mock";
 
 /// 流式 body（`text/event-stream`）。
-pub fn sse_body(events: &[CompletionEvent]) -> String {
+pub fn sse_body(events: &[LanguageModelCompletionEvent]) -> String {
     let mut body = String::new();
     let mut index = 0u32;
     let mut stopped = false;
 
     for event in events {
         match event {
-            CompletionEvent::Text(text) => {
+            LanguageModelCompletionEvent::Text(text) => {
                 body.push_str(&delta_chunk(&serde_json::json!({ "content": text }), None));
             }
-            CompletionEvent::Reasoning { text, .. } => {
+            LanguageModelCompletionEvent::Reasoning { text, .. } => {
                 // OpenAI 官方不返回思考；兼容端点用 `reasoning_content`。
                 body.push_str(&delta_chunk(
                     &serde_json::json!({ "reasoning_content": text }),
                     None,
                 ));
             }
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::ToolUse {
                 id, name, input, ..
             } => {
                 let call = serde_json::json!({
@@ -46,7 +46,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
                     "type": "function",
                     "function": {
                         "name": name,
-                        "arguments": input.to_string(),
+                        "arguments": input.to_wire_string(),
                     },
                 });
                 index += 1;
@@ -55,7 +55,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
                     None,
                 ));
             }
-            CompletionEvent::Usage(usage) => {
+            LanguageModelCompletionEvent::Usage(usage) => {
                 let frame = serde_json::json!({
                     "id": "chatcmpl-mock",
                     "object": "chat.completion.chunk",
@@ -69,7 +69,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
                 });
                 body.push_str(&format!("data: {frame}\n\n"));
             }
-            CompletionEvent::Stop(reason) => {
+            LanguageModelCompletionEvent::Stop(reason) => {
                 body.push_str(&delta_chunk(
                     &serde_json::json!({}),
                     Some(finish_reason(*reason)),
@@ -87,7 +87,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
 }
 
 /// 非流式 body（`stream: false` 的 JSON）。
-pub fn completion_body(events: &[CompletionEvent]) -> String {
+pub fn completion_body(events: &[LanguageModelCompletionEvent]) -> String {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
@@ -96,9 +96,11 @@ pub fn completion_body(events: &[CompletionEvent]) -> String {
 
     for event in events {
         match event {
-            CompletionEvent::Text(fragment) => text.push_str(fragment),
-            CompletionEvent::Reasoning { text: fragment, .. } => reasoning.push_str(fragment),
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::Text(fragment) => text.push_str(fragment),
+            LanguageModelCompletionEvent::Reasoning { text: fragment, .. } => {
+                reasoning.push_str(fragment)
+            }
+            LanguageModelCompletionEvent::ToolUse {
                 id, name, input, ..
             } => tool_calls.push(serde_json::json!({
                 "id": id,
@@ -108,8 +110,8 @@ pub fn completion_body(events: &[CompletionEvent]) -> String {
                     "arguments": input.to_string(),
                 },
             })),
-            CompletionEvent::Usage(tokens) => usage = Some(*tokens),
-            CompletionEvent::Stop(reason) => stop = Some(*reason),
+            LanguageModelCompletionEvent::Usage(tokens) => usage = Some(*tokens),
+            LanguageModelCompletionEvent::Stop(reason) => stop = Some(*reason),
         }
     }
 
@@ -171,7 +173,7 @@ mod tests {
 
     use super::*;
 
-    fn decode(body: &str) -> Vec<CompletionEvent> {
+    fn decode(body: &str) -> Vec<LanguageModelCompletionEvent> {
         let mut decoder = crate::chat_completion::response::StreamDecoder::default();
         let mut events = decoder.push(body.as_bytes());
         events.extend(decoder.finish());
@@ -181,12 +183,12 @@ mod tests {
     #[test]
     fn sse_body_round_trips_text_reasoning_and_stop() {
         let events = vec![
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: "think".into(),
                 signature: None,
             },
-            CompletionEvent::Text("hello".into()),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Text("hello".into()),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ];
         assert_eq!(decode(&sse_body(&events)), events);
     }
@@ -196,34 +198,34 @@ mod tests {
         // 真实 OpenAI 端点在 finish_reason 之后才发 usage；生成器按事件顺序发，
         // 解码器把 ToolUse 留到 finish_reason 再吐，所以期望顺序是 usage 在前。
         let events = vec![
-            CompletionEvent::Text("calling".into()),
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::Text("calling".into()),
+            LanguageModelCompletionEvent::ToolUse {
                 id: "call_1".into(),
                 name: "read_file".into(),
-                input: serde_json::json!({ "path": "a" }),
+                input: serde_json::json!({ "path": "a" }).into(),
                 is_complete: true,
             },
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::ToolUse),
+            LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
         ];
         assert_eq!(
             decode(&sse_body(&events)),
             vec![
-                CompletionEvent::Text("calling".into()),
-                CompletionEvent::Usage(TokenUsage {
+                LanguageModelCompletionEvent::Text("calling".into()),
+                LanguageModelCompletionEvent::Usage(TokenUsage {
                     input_tokens: 12,
                     output_tokens: 3,
                 }),
-                CompletionEvent::ToolUse {
+                LanguageModelCompletionEvent::ToolUse {
                     id: "call_1".into(),
                     name: "read_file".into(),
-                    input: serde_json::json!({ "path": "a" }),
+                    input: serde_json::json!({ "path": "a" }).into(),
                     is_complete: true,
                 },
-                CompletionEvent::Stop(StopReason::ToolUse),
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
     }
@@ -231,22 +233,22 @@ mod tests {
     #[test]
     fn completion_body_round_trips_all_parts() {
         let events = vec![
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: "think".into(),
                 signature: None,
             },
-            CompletionEvent::Text("hello".into()),
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::Text("hello".into()),
+            LanguageModelCompletionEvent::ToolUse {
                 id: "call_1".into(),
                 name: "read_file".into(),
-                input: serde_json::json!({ "path": "a" }),
+                input: serde_json::json!({ "path": "a" }).into(),
                 is_complete: true,
             },
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::ToolUse),
+            LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
         ];
         let parsed: crate::chat_completion::response::ChatCompletionResponse =
             serde_json::from_str(&completion_body(&events)).unwrap();

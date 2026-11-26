@@ -19,7 +19,7 @@
    `error.message` 全部丢弃，导致：
    - `StopReason::MaxTokens` / `Refusal` 两个变体永远不会出现——client 只按「有没有
      `tool_calls`」猜（旧 `lib.rs` 的 `wants_tools`）；被截断的回复会被当成正常结束。
-   - `CompletionEvent::Usage` 从未发出，`TokenUsage` 永远为空，而请求侧已经会发
+   - `LanguageModelCompletionEvent::Usage` 从未发出，`TokenUsage` 永远为空，而请求侧已经会发
      `stream_options.include_usage`。
    - 非 2xx 时把整个 body（JSON 或 HTML）塞进 `LlmError::ProviderRejection.message`。
 
@@ -42,7 +42,7 @@
 | | `finish_reason` | `usage` | 流式 |
 |---|---|---|---|
 | Zed | wire 里是 `Option<String>`（`open_ai/src/open_ai.rs:918`），**存下来但不映射**；只有 copilot 适配器映射（`copilot_chat/src/model.rs:394`） | `Response.usage: Usage` 强制非可选（`:911`） | `stream_completion` 读 SSE，`OpenAiResponseEventMapper` 逐事件映射（`completion.rs:752`） |
-| rig | `StopReason` 枚举，`length` → `MaxTokens` 等（`completion/message.rs` 一族） | 流末 usage 帧 | `CompletionEvent` 流，工具调用按 index 归并 |
+| rig | `StopReason` 枚举，`length` → `MaxTokens` 等（`completion/message.rs` 一族） | 流末 usage 帧 | `LanguageModelCompletionEvent` 流，工具调用按 index 归并 |
 | genai | `StopReason` 映射 | `Usage` 从最后一帧取 | adapter 逐帧解析 SSE |
 
 结论：**映射 `finish_reason` 是 rig/genai 的共识，Zed 只是没在 OpenAI 适配器里做**；
@@ -87,8 +87,8 @@ OpenAI 的流以 `data: [DONE]` 收尾；`finish_reason` 在**最后一条带 ch
 
 ### D3：`usage` 映射成事件，且排在 `Stop` 之前
 
-- 非流式：body 的 `usage` 若存在 → `CompletionEvent::Usage`。
-- 流式：`include_usage` 的最后一帧（`choices: []` + `usage`）→ `CompletionEvent::Usage`。
+- 非流式：body 的 `usage` 若存在 → `LanguageModelCompletionEvent::Usage`。
+- 流式：`include_usage` 的最后一帧（`choices: []` + `usage`）→ `LanguageModelCompletionEvent::Usage`。
 - 顺序固定 `Usage` 在 `Stop` 之前，上层看到 `Stop` 即可收尾。
 - 兼容端点不给 `usage` 时就不发，不补零（`TokenUsage::default()` 会被误读成「用量为零」）。
 

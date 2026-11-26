@@ -11,7 +11,7 @@
 离线验证一直有两层，但只有一层有库支持：
 
 1. **逻辑层**：`fake::FakeClient`（`aa_language_model/fake`）——进程内返回
-   `CompletionEvent`，覆盖 agent loop / 压缩 / 会话，不碰 wire。
+   `LanguageModelCompletionEvent`，覆盖 agent loop / 压缩 / 会话，不碰 wire。
 2. **协议层**：需要真实的 HTTP + SSE / NDJSON。此前只能手写 SSE 字符串，
    或者起一个临时 Python 脚本当端点。
 
@@ -36,15 +36,15 @@ Rust 类型，改动 provider 后没人记得同步。
 
 ```rust
 // aa_ai_openai / aa_ai_openrouter
-pub fn sse_body(events: &[CompletionEvent]) -> String;
-pub fn completion_body(events: &[CompletionEvent]) -> String;
+pub fn sse_body(events: &[LanguageModelCompletionEvent]) -> String;
+pub fn completion_body(events: &[LanguageModelCompletionEvent]) -> String;
 
 // aa_ai_ollama
-pub fn ndjson_body(events: &[CompletionEvent]) -> String;
-pub fn chat_body(events: &[CompletionEvent]) -> String;
+pub fn ndjson_body(events: &[LanguageModelCompletionEvent]) -> String;
+pub fn chat_body(events: &[LanguageModelCompletionEvent]) -> String;
 ```
 
-- 只依赖 `CompletionEvent`，不依赖请求侧结构；
+- 只依赖 `LanguageModelCompletionEvent`，不依赖请求侧结构；
 - OpenAI 与 OpenRouter **不共享**生成器：两家响应形状接近但不同
   （`reasoning` vs `reasoning_content`、`reasoning_details`、`Stop` 延后），
   共享会把差异藏回一个 crate（与 [0012](0012-openrouter-vendor.md) 同样的理由）；

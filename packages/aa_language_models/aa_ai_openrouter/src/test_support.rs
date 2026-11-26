@@ -9,22 +9,22 @@
 //!   `Reasoning` 事件；
 //! - `Stop` 在 `[DONE]` 才发出，保证 `Usage` 排在它前面。
 
-use aa_language_model::provider::{CompletionEvent, StopReason};
+use aa_language_model::provider::{LanguageModelCompletionEvent, StopReason};
 
 const MODEL: &str = "mock";
 
 /// 流式 body（`text/event-stream`）。
-pub fn sse_body(events: &[CompletionEvent]) -> String {
+pub fn sse_body(events: &[LanguageModelCompletionEvent]) -> String {
     let mut body = String::new();
     let mut index = 0u32;
     let mut stopped = false;
 
     for event in events {
         match event {
-            CompletionEvent::Text(text) => {
+            LanguageModelCompletionEvent::Text(text) => {
                 body.push_str(&delta_chunk(&serde_json::json!({ "content": text }), None));
             }
-            CompletionEvent::Reasoning { text, signature } => {
+            LanguageModelCompletionEvent::Reasoning { text, signature } => {
                 let mut delta = serde_json::Map::new();
                 if !text.is_empty() {
                     delta.insert("reasoning".to_owned(), serde_json::json!(text));
@@ -39,7 +39,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
                     body.push_str(&delta_chunk(&serde_json::Value::Object(delta), None));
                 }
             }
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::ToolUse {
                 id, name, input, ..
             } => {
                 let call = serde_json::json!({
@@ -48,7 +48,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
                     "type": "function",
                     "function": {
                         "name": name,
-                        "arguments": input.to_string(),
+                        "arguments": input.to_wire_string(),
                     },
                 });
                 index += 1;
@@ -57,7 +57,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
                     None,
                 ));
             }
-            CompletionEvent::Usage(usage) => {
+            LanguageModelCompletionEvent::Usage(usage) => {
                 let frame = serde_json::json!({
                     "id": "gen-mock",
                     "object": "chat.completion.chunk",
@@ -71,7 +71,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
                 });
                 body.push_str(&format!("data: {frame}\n\n"));
             }
-            CompletionEvent::Stop(reason) => {
+            LanguageModelCompletionEvent::Stop(reason) => {
                 body.push_str(&delta_chunk(
                     &serde_json::json!({}),
                     Some(finish_reason(*reason)),
@@ -89,7 +89,7 @@ pub fn sse_body(events: &[CompletionEvent]) -> String {
 }
 
 /// 非流式 body（`stream: false` 的 JSON）。
-pub fn completion_body(events: &[CompletionEvent]) -> String {
+pub fn completion_body(events: &[LanguageModelCompletionEvent]) -> String {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut details: Option<serde_json::Value> = None;
@@ -99,8 +99,8 @@ pub fn completion_body(events: &[CompletionEvent]) -> String {
 
     for event in events {
         match event {
-            CompletionEvent::Text(fragment) => text.push_str(fragment),
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Text(fragment) => text.push_str(fragment),
+            LanguageModelCompletionEvent::Reasoning {
                 text: fragment,
                 signature,
             } => {
@@ -112,7 +112,7 @@ pub fn completion_body(events: &[CompletionEvent]) -> String {
                     details = Some(parsed);
                 }
             }
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::ToolUse {
                 id, name, input, ..
             } => tool_calls.push(serde_json::json!({
                 "id": id,
@@ -122,8 +122,8 @@ pub fn completion_body(events: &[CompletionEvent]) -> String {
                     "arguments": input.to_string(),
                 },
             })),
-            CompletionEvent::Usage(tokens) => usage = Some(*tokens),
-            CompletionEvent::Stop(reason) => stop = Some(*reason),
+            LanguageModelCompletionEvent::Usage(tokens) => usage = Some(*tokens),
+            LanguageModelCompletionEvent::Stop(reason) => stop = Some(*reason),
         }
     }
 
@@ -186,7 +186,7 @@ mod tests {
 
     use super::*;
 
-    fn decode(body: &str) -> Vec<CompletionEvent> {
+    fn decode(body: &str) -> Vec<LanguageModelCompletionEvent> {
         let mut decoder = crate::chat_completion::response::StreamDecoder::default();
         let mut events = decoder.push(body.as_bytes());
         events.extend(decoder.finish());
@@ -196,12 +196,12 @@ mod tests {
     #[test]
     fn sse_body_round_trips_text_usage_and_stop() {
         let events = vec![
-            CompletionEvent::Text("hello".into()),
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Text("hello".into()),
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ];
         assert_eq!(decode(&sse_body(&events)), events);
     }
@@ -213,29 +213,29 @@ mod tests {
         ])
         .to_string();
         let events = vec![
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: "think".into(),
                 signature: None,
             },
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: String::new(),
                 signature: Some(signature.clone()),
             },
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ];
         // 纯文本思考在帧到达时就吐出；details 到 finish_reason 才还原成 signature。
         assert_eq!(
             decode(&sse_body(&events)),
             vec![
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "think".into(),
                     signature: None,
                 },
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: String::new(),
                     signature: Some(signature),
                 },
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -247,26 +247,26 @@ mod tests {
         ])
         .to_string();
         let events = vec![
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: "think".into(),
                 signature: None,
             },
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: String::new(),
                 signature: Some(signature),
             },
-            CompletionEvent::Text("hello".into()),
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::Text("hello".into()),
+            LanguageModelCompletionEvent::ToolUse {
                 id: "call_1".into(),
                 name: "read_file".into(),
-                input: serde_json::json!({ "path": "a" }),
+                input: serde_json::json!({ "path": "a" }).into(),
                 is_complete: true,
             },
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::ToolUse),
+            LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
         ];
         let parsed: crate::chat_completion::response::ChatCompletionResponse =
             serde_json::from_str(&completion_body(&events)).unwrap();

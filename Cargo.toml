@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "packages/aa_agent",
     "packages/aa_language_model",
     "packages/aa_language_models",
     "packages/aa_language_models/aa_ai_openai",
@@ -10,12 +9,16 @@ members = [
     # 放进 workspace 是为了让它们至少被编译到，避免「看起来支持、实际编译不到」。
     "packages/aa_language_models/aa_ai_anthropic",
     "packages/aa_language_models/aa_ai_gemini",
-    "packages/aa_language_models/aa_ai_ollama",
+    "packages/aa_language_models/aa_ai_ollama", "packages/aa_ai_orchestration", "packages/aa_ai_harness", "packages/aa_ai_acp", "packages/aa_ai_compaction", "packages/aa_ai_persistence", "packages/aa_ai_core",
 ]
 
 # 依赖统一在这里声明版本：成员 crate 只写 `dep.workspace = true`。
 # 好处是升级/对齐版本只有一处，且不会出现两个包依赖不同大版本。
 [workspace.dependencies]
+aa_ai_core = { path = "packages/aa_ai_core" }
+aa_ai_harness = { path = "packages/aa_ai_harness" }
+aa_ai_persistence = { path = "packages/aa_ai_persistence" }
+aa_ai_compaction = { path = "packages/aa_ai_compaction" }
 aa_language_model = { path = "packages/aa_language_model" }
 aa_language_models = { path = "packages/aa_language_models" }
 aa_ai_openai = { path = "packages/aa_language_models/aa_ai_openai" }
@@ -26,13 +29,14 @@ aa_ai_ollama = { path = "packages/aa_language_models/aa_ai_ollama" }
 aa_http_client = { path = "../aa-stack/packages/util/aa_http_client" }
 aa_reqwest_client = { path = "../aa-stack/packages/util/aa_reqwest_client" }
 
+async-stream = "0.3"
 futures = "0.3"
 # 用系统信任库（rustls-native-certs）而不是内置 webpki-roots：企业/本地代理
 # （mitmproxy 等）的 CA 通常装在系统库里，curl/git 能用而 webpki-roots 不认。
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls-native-roots", "stream"] }
 schemars = "0.8"
 base64 = "0.22"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }

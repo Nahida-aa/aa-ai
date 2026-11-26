@@ -1,0 +1,11 @@
+[package]
+name = "aa_ai_acp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aa_ai_harness.workspace = true
+
+[dev-dependencies]
+aa_ai_core.workspace = true
+aa_language_model = { workspace = true, features = ["fake"] }

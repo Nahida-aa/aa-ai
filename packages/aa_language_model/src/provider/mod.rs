@@ -17,11 +17,14 @@
 
 mod event;
 mod model;
+mod stream_json;
 
-pub use event::CompletionEvent;
+pub use event::LanguageModelCompletionEvent;
 pub use model::{
     LanguageModel, ReasoningEffort, ResponseFormatSupport, ServiceTier, StopReason, TokenUsage,
 };
+/// 流式工具参数的修复式解析（provider 流解码用，工具层也可复用）。
+pub use stream_json::{fix_streamed_json, parse_streamed_json};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -30,11 +33,12 @@ use std::pin::Pin;
 ///
 /// `'static` 是有意的：流一旦返回就自成一体，不借用调用栈上的 `Request`。
 /// 需要借用历史的部分在 encoder 里当场写完 body，不把引用带出方法。
-pub type EventStream = futures::stream::BoxStream<'static, Result<CompletionEvent, LlmError>>;
+pub type EventStream =
+    futures::stream::BoxStream<'static, Result<LanguageModelCompletionEvent, LlmError>>;
 
 /// 与 LLM 服务器通信的接口（一次 LLM 调用，数据层）。
 ///
-/// **不含 agent loop**：它只发一个 `Request`、收回流式 `CompletionEvent`。
+/// **不含 agent loop**：它只发一个 `Request`、收回流式 `LanguageModelCompletionEvent`。
 /// 工具循环（收 `ToolUse` → 执行工具 → 回填 → 再发）由 `aa_agent` 的 loop 做。
 ///
 /// 签名按 [0006](../../../../docs/decisions/0006-wire-request-shape.md) D2 重新设计：

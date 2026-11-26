@@ -326,7 +326,7 @@ impl aa_language_model::provider::LanguageModelClient for OpenRouterLanguageMode
 
 // ---------- SSE ----------
 
-/// 把响应体解成 `CompletionEvent` 流（`text/event-stream`）。
+/// 把响应体解成 `LanguageModelCompletionEvent` 流（`text/event-stream`）。
 ///
 /// 每读到一块就解码，不把整个 body 缓冲起来。
 fn sse_event_stream(reader: aa_http_client::AsyncBody) -> aa_language_model::provider::EventStream {
@@ -337,7 +337,7 @@ fn sse_event_stream(reader: aa_http_client::AsyncBody) -> aa_language_model::pro
         decoder: crate::chat_completion::response::StreamDecoder,
         pending: VecDeque<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,

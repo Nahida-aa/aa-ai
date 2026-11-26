@@ -12,7 +12,7 @@
 //! 带这段代码（feature 门控）。
 //!
 //! ```no_run
-//! use aa_language_model::provider::CompletionEvent;
+//! use aa_language_model::provider::LanguageModelCompletionEvent;
 //! use aa_language_models::mock_server::{MockReply, MockServer, Wire};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use aa_language_model::provider::CompletionEvent;
+use aa_language_model::provider::LanguageModelCompletionEvent;
 
 /// 端点说哪家的 wire 协议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +112,7 @@ impl MockRequest {
 #[derive(Debug, Clone)]
 pub enum MockReply {
     /// 按请求的 `stream` 自动编码成 SSE / NDJSON 或非流式 JSON。
-    Events(Vec<CompletionEvent>),
+    Events(Vec<LanguageModelCompletionEvent>),
     /// 非 2xx：`{"error": ...}`（OpenAI 家族是对象，Ollama 是字符串）。
     HttpError { status: u16, message: String },
     /// 原样返回，用于构造畸形 body / 自定义 Content-Type。
@@ -127,12 +127,12 @@ impl MockReply {
     /// 一段文本 + 正常结束。
     pub fn text(text: impl Into<String>) -> Self {
         Self::Events(vec![
-            CompletionEvent::Text(text.into()),
-            CompletionEvent::Stop(aa_language_model::provider::StopReason::EndTurn),
+            LanguageModelCompletionEvent::Text(text.into()),
+            LanguageModelCompletionEvent::Stop(aa_language_model::provider::StopReason::EndTurn),
         ])
     }
 
-    pub fn events(events: Vec<CompletionEvent>) -> Self {
+    pub fn events(events: Vec<LanguageModelCompletionEvent>) -> Self {
         Self::Events(events)
     }
 }

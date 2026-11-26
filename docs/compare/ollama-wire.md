@@ -113,7 +113,7 @@ Zed 的 `ModelShow`（`crates/ollama/src/ollama.rs:190`）自己写了个 `Deser
   工具结果走独立 `role:"tool"` 消息，用 `tool_name` 关联（从历史里的
   `ToolCall{id,name}` 反查）。
 - `chat::response::StreamDecoder`：一行一个对象；`message.thinking` →
-  `CompletionEvent::Reasoning`；`done_reason` 与「本响应是否出现过 tool_calls」
+  `LanguageModelCompletionEvent::Reasoning`；`done_reason` 与「本响应是否出现过 tool_calls」
   共同决定 `StopReason`（`length` 优先）。
 - 工具调用没有 `id` 时合成 `call_N`，因为 canonical `ContentPart::ToolCall.id`
   是必填，agent loop 也靠它把结果对回去。

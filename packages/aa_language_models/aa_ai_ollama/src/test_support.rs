@@ -6,19 +6,19 @@
 //! `Refusal` 在 Ollama 没有对应字段（没有 content_filter），生成器按 `stop`
 //! 输出，解码回来会变成 `EndTurn`；测试不要用 `Refusal` 做往返断言。
 
-use aa_language_model::provider::{CompletionEvent, StopReason};
+use aa_language_model::provider::{LanguageModelCompletionEvent, StopReason};
 
 const MODEL: &str = "mock";
 
 /// 流式 body（NDJSON）。
-pub fn ndjson_body(events: &[CompletionEvent]) -> String {
+pub fn ndjson_body(events: &[LanguageModelCompletionEvent]) -> String {
     let mut body = String::new();
     let mut usage = None;
     let mut stop = None;
 
     for event in events {
         match event {
-            CompletionEvent::Text(text) => {
+            LanguageModelCompletionEvent::Text(text) => {
                 body.push_str(&line(serde_json::json!({
                     "model": MODEL,
                     "created_at": "1970-01-01T00:00:00Z",
@@ -26,7 +26,7 @@ pub fn ndjson_body(events: &[CompletionEvent]) -> String {
                     "done": false,
                 })));
             }
-            CompletionEvent::Reasoning { text, .. } => {
+            LanguageModelCompletionEvent::Reasoning { text, .. } => {
                 body.push_str(&line(serde_json::json!({
                     "model": MODEL,
                     "created_at": "1970-01-01T00:00:00Z",
@@ -34,7 +34,7 @@ pub fn ndjson_body(events: &[CompletionEvent]) -> String {
                     "done": false,
                 })));
             }
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::ToolUse {
                 id, name, input, ..
             } => {
                 body.push_str(&line(serde_json::json!({
@@ -45,14 +45,17 @@ pub fn ndjson_body(events: &[CompletionEvent]) -> String {
                         "content": "",
                         "tool_calls": [{
                             "id": id,
-                            "function": { "name": name, "arguments": input },
+                            "function": {
+                                "name": name,
+                                "arguments": input.as_value().cloned().unwrap_or(serde_json::Value::Null)
+                            },
                         }],
                     },
                     "done": false,
                 })));
             }
-            CompletionEvent::Usage(tokens) => usage = Some(*tokens),
-            CompletionEvent::Stop(reason) => stop = Some(*reason),
+            LanguageModelCompletionEvent::Usage(tokens) => usage = Some(*tokens),
+            LanguageModelCompletionEvent::Stop(reason) => stop = Some(*reason),
         }
     }
 
@@ -61,7 +64,7 @@ pub fn ndjson_body(events: &[CompletionEvent]) -> String {
 }
 
 /// 非流式 body（单个 JSON 对象，没有结尾换行）。
-pub fn chat_body(events: &[CompletionEvent]) -> String {
+pub fn chat_body(events: &[LanguageModelCompletionEvent]) -> String {
     let mut text = String::new();
     let mut thinking = String::new();
     let mut tool_calls = Vec::new();
@@ -70,16 +73,21 @@ pub fn chat_body(events: &[CompletionEvent]) -> String {
 
     for event in events {
         match event {
-            CompletionEvent::Text(fragment) => text.push_str(fragment),
-            CompletionEvent::Reasoning { text: fragment, .. } => thinking.push_str(fragment),
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::Text(fragment) => text.push_str(fragment),
+            LanguageModelCompletionEvent::Reasoning { text: fragment, .. } => {
+                thinking.push_str(fragment)
+            }
+            LanguageModelCompletionEvent::ToolUse {
                 id, name, input, ..
             } => tool_calls.push(serde_json::json!({
                 "id": id,
-                "function": { "name": name, "arguments": input },
+                "function": {
+                    "name": name,
+                    "arguments": input.as_value().cloned().unwrap_or(serde_json::Value::Null)
+                },
             })),
-            CompletionEvent::Usage(tokens) => usage = Some(*tokens),
-            CompletionEvent::Stop(reason) => stop = Some(*reason),
+            LanguageModelCompletionEvent::Usage(tokens) => usage = Some(*tokens),
+            LanguageModelCompletionEvent::Stop(reason) => stop = Some(*reason),
         }
     }
 
@@ -133,7 +141,7 @@ mod tests {
 
     use super::*;
 
-    fn decode(body: &str) -> Vec<CompletionEvent> {
+    fn decode(body: &str) -> Vec<LanguageModelCompletionEvent> {
         let mut decoder = crate::chat::response::StreamDecoder::default();
         let mut events = decoder.push(body.as_bytes());
         events.extend(decoder.finish());
@@ -143,13 +151,13 @@ mod tests {
     #[test]
     fn ndjson_body_round_trips_text_usage_and_stop() {
         let events = vec![
-            CompletionEvent::Text("Hel".into()),
-            CompletionEvent::Text("lo".into()),
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Text("Hel".into()),
+            LanguageModelCompletionEvent::Text("lo".into()),
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ];
         assert_eq!(decode(&ndjson_body(&events)), events);
     }
@@ -157,17 +165,17 @@ mod tests {
     #[test]
     fn ndjson_body_round_trips_tool_calls() {
         let events = vec![
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: "think".into(),
                 signature: None,
             },
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::ToolUse {
                 id: "call_1".into(),
                 name: "get_weather".into(),
-                input: serde_json::json!({ "city": "Tokyo" }),
+                input: serde_json::json!({ "city": "Tokyo" }).into(),
                 is_complete: true,
             },
-            CompletionEvent::Stop(StopReason::ToolUse),
+            LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
         ];
         assert_eq!(decode(&ndjson_body(&events)), events);
     }
@@ -175,22 +183,22 @@ mod tests {
     #[test]
     fn chat_body_round_trips_all_parts() {
         let events = vec![
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: "think".into(),
                 signature: None,
             },
-            CompletionEvent::Text("hello".into()),
-            CompletionEvent::ToolUse {
+            LanguageModelCompletionEvent::Text("hello".into()),
+            LanguageModelCompletionEvent::ToolUse {
                 id: "call_1".into(),
                 name: "get_weather".into(),
-                input: serde_json::json!({ "city": "Tokyo" }),
+                input: serde_json::json!({ "city": "Tokyo" }).into(),
                 is_complete: true,
             },
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::ToolUse),
+            LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
         ];
         assert_eq!(decode(&chat_body(&events)), events);
     }

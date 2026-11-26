@@ -1,0 +1,12 @@
+[package]
+name = "aa_ai_compaction"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aa_ai_core.workspace = true
+aa_ai_persistence.workspace = true
+aa_language_model.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

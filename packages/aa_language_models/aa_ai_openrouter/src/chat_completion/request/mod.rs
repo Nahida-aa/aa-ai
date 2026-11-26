@@ -272,8 +272,10 @@ pub fn to_chat_completion_request<'a>(
 
     let mut tools = Vec::with_capacity(request.tools.len());
     for tool in &request.tools {
-        let aa_language_model::request::tools::ToolInput::Function { input_schema, .. } =
-            &tool.input
+        let aa_language_model::request::tools::LanguageModelRequestToolInput::Function {
+            input_schema,
+            ..
+        } = &tool.input
         else {
             return Err(aa_language_model::provider::LlmError::Unsupported(
                 "OpenRouter Chat Completions does not support custom tools".to_owned(),
@@ -684,7 +686,7 @@ mod tests {
             .push(Arc::new(aa_language_model::request::tools::Tool {
                 name: "read".to_owned(),
                 description: "read".to_owned(),
-                input: aa_language_model::request::tools::ToolInput::Function {
+                input: aa_language_model::request::tools::LanguageModelRequestToolInput::Function {
                     input_schema: serde_json::json!({"type": "object"}),
                     use_input_streaming: false,
                 },

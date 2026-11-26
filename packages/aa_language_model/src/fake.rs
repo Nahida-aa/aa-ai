@@ -30,7 +30,7 @@ use futures::stream;
 type Responder = dyn Fn(
         &crate::provider::LanguageModel,
         &crate::request::Request,
-    ) -> Vec<crate::provider::CompletionEvent>
+    ) -> Vec<crate::provider::LanguageModelCompletionEvent>
     + Send
     + Sync;
 
@@ -51,7 +51,7 @@ impl FakeClient {
         handler: impl Fn(
             &crate::provider::LanguageModel,
             &crate::request::Request,
-        ) -> Vec<crate::provider::CompletionEvent>
+        ) -> Vec<crate::provider::LanguageModelCompletionEvent>
         + Send
         + Sync
         + 'static,
@@ -63,7 +63,7 @@ impl FakeClient {
     }
 
     /// 单轮剧本。
-    pub fn new(script: Vec<crate::provider::CompletionEvent>) -> Self {
+    pub fn new(script: Vec<crate::provider::LanguageModelCompletionEvent>) -> Self {
         Self::with_rounds([script])
     }
 
@@ -71,12 +71,12 @@ impl FakeClient {
     ///
     /// 多轮用于测 agent loop：第一轮要先返回 `ToolUse`，第二轮才返回文本 + `Stop`。
     pub fn with_rounds(
-        rounds: impl IntoIterator<Item = Vec<crate::provider::CompletionEvent>>,
+        rounds: impl IntoIterator<Item = Vec<crate::provider::LanguageModelCompletionEvent>>,
     ) -> Self {
         let rounds = Mutex::new(rounds.into_iter().collect::<VecDeque<_>>());
         Self::with_handler(move |_model, _request| {
             rounds.lock().unwrap().pop_front().unwrap_or_else(|| {
-                vec![crate::provider::CompletionEvent::Stop(
+                vec![crate::provider::LanguageModelCompletionEvent::Stop(
                     crate::provider::StopReason::EndTurn,
                 )]
             })
@@ -86,21 +86,25 @@ impl FakeClient {
     /// 回一段固定文本。
     pub fn text(msg: impl Into<String>) -> Self {
         Self::new(vec![
-            crate::provider::CompletionEvent::Text(msg.into()),
-            crate::provider::CompletionEvent::Stop(crate::provider::StopReason::EndTurn),
+            crate::provider::LanguageModelCompletionEvent::Text(msg.into()),
+            crate::provider::LanguageModelCompletionEvent::Stop(
+                crate::provider::StopReason::EndTurn,
+            ),
         ])
     }
 
     /// 回「LLM 要调一个工具」（agent loop 会去执行并回填）。
     pub fn tool_use(id: &str, name: &str, input: serde_json::Value) -> Self {
         Self::new(vec![
-            crate::provider::CompletionEvent::ToolUse {
+            crate::provider::LanguageModelCompletionEvent::ToolUse {
                 id: id.to_string(),
                 name: name.to_string(),
-                input,
+                input: input.into(),
                 is_complete: true,
             },
-            crate::provider::CompletionEvent::Stop(crate::provider::StopReason::ToolUse),
+            crate::provider::LanguageModelCompletionEvent::Stop(
+                crate::provider::StopReason::ToolUse,
+            ),
         ])
     }
 
@@ -142,7 +146,9 @@ mod tests {
     use futures::executor::block_on;
 
     use super::*;
-    use crate::provider::{CompletionEvent, LanguageModel, LanguageModelClient, StopReason};
+    use crate::provider::{
+        LanguageModel, LanguageModelClient, LanguageModelCompletionEvent, StopReason,
+    };
     use crate::request::{Request, message};
 
     fn model() -> LanguageModel {
@@ -160,7 +166,7 @@ mod tests {
         request
     }
 
-    fn collect(client: &FakeClient, request: &Request) -> Vec<CompletionEvent> {
+    fn collect(client: &FakeClient, request: &Request) -> Vec<LanguageModelCompletionEvent> {
         block_on(async {
             client
                 .stream_completion(&model(), request)
@@ -176,19 +182,19 @@ mod tests {
     fn replays_script_and_records_requests() {
         let client = FakeClient::with_rounds([
             vec![
-                CompletionEvent::Text("一".to_owned()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("一".to_owned()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ],
             vec![
-                CompletionEvent::Text("二".to_owned()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("二".to_owned()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ],
         ]);
 
         let first = collect(&client, &request("first"));
         let second = collect(&client, &request("second"));
-        assert!(matches!(first[0], CompletionEvent::Text(ref text) if text == "一"));
-        assert!(matches!(second[0], CompletionEvent::Text(ref text) if text == "二"));
+        assert!(matches!(first[0], LanguageModelCompletionEvent::Text(ref text) if text == "一"));
+        assert!(matches!(second[0], LanguageModelCompletionEvent::Text(ref text) if text == "二"));
 
         let seen = client.requests();
         assert_eq!(seen.len(), 2);
@@ -204,8 +210,11 @@ mod tests {
         let client = FakeClient::with_handler(move |_model, request| {
             let n = calls.fetch_add(1, Ordering::SeqCst);
             vec![
-                CompletionEvent::Text(format!("第 {n} 次，收到 {} 条消息", request.messages.len())),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text(format!(
+                    "第 {n} 次，收到 {} 条消息",
+                    request.messages.len()
+                )),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         });
 
@@ -213,11 +222,11 @@ mod tests {
         let second = collect(&client, &request("b"));
         assert!(matches!(
             first[0],
-            CompletionEvent::Text(ref text) if text == "第 0 次，收到 1 条消息"
+            LanguageModelCompletionEvent::Text(ref text) if text == "第 0 次，收到 1 条消息"
         ));
         assert!(matches!(
             second[0],
-            CompletionEvent::Text(ref text) if text == "第 1 次，收到 1 条消息"
+            LanguageModelCompletionEvent::Text(ref text) if text == "第 1 次，收到 1 条消息"
         ));
         assert_eq!(client.requests().len(), 2);
     }
@@ -230,7 +239,7 @@ mod tests {
         let events = collect(&client, &request("x"));
         assert!(matches!(
             events.as_slice(),
-            [CompletionEvent::Stop(StopReason::EndTurn)]
+            [LanguageModelCompletionEvent::Stop(StopReason::EndTurn)]
         ));
         assert_eq!(client.requests().len(), 2);
     }

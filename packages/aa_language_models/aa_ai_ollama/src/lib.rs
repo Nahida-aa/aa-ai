@@ -281,7 +281,7 @@ impl aa_language_model::provider::LanguageModelClient for OllamaLanguageModelPro
 
 // ---------- NDJSON 流 ----------
 
-/// 把响应体解成 `CompletionEvent` 流（NDJSON：一行一个对象）。
+/// 把响应体解成 `LanguageModelCompletionEvent` 流（NDJSON：一行一个对象）。
 ///
 /// 每读到一块就解码，不把整个响应缓冲起来。
 fn ndjson_event_stream(
@@ -335,7 +335,10 @@ struct NdjsonState {
     reader: aa_http_client::AsyncBody,
     decoder: crate::chat::response::StreamDecoder,
     pending: VecDeque<
-        Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
+        Result<
+            aa_language_model::provider::LanguageModelCompletionEvent,
+            aa_language_model::provider::LlmError,
+        >,
     >,
     /// 网络流已结束（或出错），只剩 `pending` 要吐。
     ended: bool,
@@ -474,15 +477,15 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                aa_language_model::provider::CompletionEvent::Text("Hel".into()),
-                aa_language_model::provider::CompletionEvent::Text("lo".into()),
-                aa_language_model::provider::CompletionEvent::Usage(
+                aa_language_model::provider::LanguageModelCompletionEvent::Text("Hel".into()),
+                aa_language_model::provider::LanguageModelCompletionEvent::Text("lo".into()),
+                aa_language_model::provider::LanguageModelCompletionEvent::Usage(
                     aa_language_model::provider::TokenUsage {
                         input_tokens: 5,
                         output_tokens: 2
                     }
                 ),
-                aa_language_model::provider::CompletionEvent::Stop(
+                aa_language_model::provider::LanguageModelCompletionEvent::Stop(
                     aa_language_model::provider::StopReason::EndTurn
                 ),
             ]
@@ -515,14 +518,14 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                aa_language_model::provider::CompletionEvent::Text("hello".into()),
-                aa_language_model::provider::CompletionEvent::Usage(
+                aa_language_model::provider::LanguageModelCompletionEvent::Text("hello".into()),
+                aa_language_model::provider::LanguageModelCompletionEvent::Usage(
                     aa_language_model::provider::TokenUsage {
                         input_tokens: 3,
                         output_tokens: 1
                     }
                 ),
-                aa_language_model::provider::CompletionEvent::Stop(
+                aa_language_model::provider::LanguageModelCompletionEvent::Stop(
                     aa_language_model::provider::StopReason::EndTurn
                 ),
             ]

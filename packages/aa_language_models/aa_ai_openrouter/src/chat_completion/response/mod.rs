@@ -1,5 +1,5 @@
 //! OpenRouter chat completions 的**响应** wire 形状：非流式 body、SSE chunk、
-//! 错误 body，以及把两者翻成 canonical `CompletionEvent` 的映射层。
+//! 错误 body，以及把两者翻成 canonical `LanguageModelCompletionEvent` 的映射层。
 //!
 //! 与 `aa_ai_openai` 的响应侧差异：
 //! - 思考字段是 `reasoning`（文档化）与 `reasoning_content`（别名），另外还有
@@ -11,8 +11,8 @@
 //! - `finish_reason` 多一个 `"error"`（映射规则见 [`stop_reason`]）。
 //!
 //! **思考回放**：`reasoning_details` 是结构化数组，模型在工具调用后要求原样回放。
-//! canonical `CompletionEvent` 没有专门的 details 变体，本 crate 把它序列化成
-//! JSON 放进 `CompletionEvent::Reasoning.signature`（见 ADR 0012 D2）；
+//! canonical `LanguageModelCompletionEvent` 没有专门的 details 变体，本 crate 把它序列化成
+//! JSON 放进 `LanguageModelCompletionEvent::Reasoning.signature`（见 ADR 0012 D2）；
 //! 纯文本 `reasoning` 照常产出 `Reasoning` 事件。
 
 use std::collections::BTreeMap;
@@ -448,42 +448,63 @@ struct PendingToolCall {
 }
 
 impl ToolCalls {
-    fn absorb(&mut self, delta: &DeltaToolCall) {
+    /// 吸收一个增量；参数有增长时返回该调用的当前快照（id、name、累计参数原文）。
+    fn absorb(&mut self, delta: &DeltaToolCall) -> Option<(String, String, String)> {
         let call = self.calls.entry(delta.index).or_default();
         if let Some(id) = &delta.id
             && !id.is_empty()
         {
             call.id = id.clone();
         }
+        let mut grew = false;
         if let Some(function) = &delta.function {
             if let Some(name) = &function.name
                 && !name.is_empty()
             {
                 call.name = name.clone();
             }
-            if let Some(arguments) = &function.arguments {
+            if let Some(arguments) = &function.arguments
+                && !arguments.is_empty()
+            {
                 call.arguments.push_str(arguments);
+                grew = true;
             }
         }
+        grew.then(|| (call.id.clone(), call.name.clone(), call.arguments.clone()))
     }
 
-    fn drain(&mut self) -> Vec<aa_language_model::provider::CompletionEvent> {
-        use aa_language_model::provider::CompletionEvent;
+    fn drain(&mut self) -> Vec<aa_language_model::provider::LanguageModelCompletionEvent> {
+        use aa_language_model::provider::LanguageModelCompletionEvent;
         std::mem::take(&mut self.calls)
             .into_values()
-            .map(|call| CompletionEvent::ToolUse {
+            .map(|call| LanguageModelCompletionEvent::ToolUse {
                 id: call.id,
                 name: call.name,
-                // 参数是增量拼起来的 JSON 文本；解析失败保留原文，不吞掉模型输出。
-                input: serde_json::from_str(&call.arguments)
-                    .unwrap_or(serde_json::Value::String(call.arguments)),
+                // 参数是增量拼起来的 JSON 文本；解析失败保留原文，交给工具层报错。
+                // 空串按 Zed 的约定当作空对象（无参数工具）。
+                input: if call.arguments.is_empty() {
+                    serde_json::json!({}).into()
+                } else {
+                    match serde_json::from_str(&call.arguments) {
+                        Ok(value) => {
+                            aa_language_model::request::message::LanguageModelToolUseInput::Json(
+                                Box::new(value),
+                            )
+                        }
+                        Err(_) => {
+                            aa_language_model::request::message::LanguageModelToolUseInput::Text(
+                                call.arguments.into(),
+                            )
+                        }
+                    }
+                },
                 is_complete: true,
             })
             .collect()
     }
 }
 
-/// 流式解码器：`bytes` → `CompletionEvent`。
+/// 流式解码器：`bytes` → `LanguageModelCompletionEvent`。
 ///
 /// 独立于 HTTP 层，便于单测：喂字节、拿事件，不需要起服务器。
 #[derive(Debug, Default)]
@@ -511,7 +532,10 @@ impl StreamDecoder {
         &mut self,
         chunk: &[u8],
     ) -> Vec<
-        Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
+        Result<
+            aa_language_model::provider::LanguageModelCompletionEvent,
+            aa_language_model::provider::LlmError,
+        >,
     > {
         self.sse.push(chunk);
         let mut out = Vec::new();
@@ -532,7 +556,10 @@ impl StreamDecoder {
     pub fn finish(
         mut self,
     ) -> Vec<
-        Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
+        Result<
+            aa_language_model::provider::LanguageModelCompletionEvent,
+            aa_language_model::provider::LlmError,
+        >,
     > {
         if self.stopped || self.done {
             return Vec::new();
@@ -551,7 +578,7 @@ impl StreamDecoder {
         data: &[u8],
         out: &mut Vec<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,
@@ -596,7 +623,7 @@ impl StreamDecoder {
             // 思考增量先于文本（与 OpenAI 兼容端点的顺序一致）。
             if let Some(reasoning) = choice.delta.reasoning() {
                 out.push(Ok(
-                    aa_language_model::provider::CompletionEvent::Reasoning {
+                    aa_language_model::provider::LanguageModelCompletionEvent::Reasoning {
                         text: reasoning.to_owned(),
                         signature: None,
                     },
@@ -608,12 +635,33 @@ impl StreamDecoder {
             if let Some(content) = &choice.delta.content
                 && !content.is_empty()
             {
-                out.push(Ok(aa_language_model::provider::CompletionEvent::Text(
-                    content.clone(),
-                )));
+                out.push(Ok(
+                    aa_language_model::provider::LanguageModelCompletionEvent::Text(
+                        content.clone(),
+                    ),
+                ));
             }
             for call in &choice.delta.tool_calls {
-                self.calls.absorb(call);
+                // 参数还在生成：修补后能解析才发一个 `is_complete: false` 的快照，
+                // 让支持流式的工具提前开工、UI 边收边看；解析不出来就继续等。
+                // 快照的值可能被截断，最终结果永远以完整事件为准。
+                if let Some((id, name, arguments)) = self.calls.absorb(call)
+                    && !id.is_empty()
+                    && !name.is_empty()
+                    && let Some(value) =
+                        aa_language_model::provider::parse_streamed_json(&arguments)
+                {
+                    out.push(Ok(
+                        aa_language_model::provider::LanguageModelCompletionEvent::ToolUse {
+                            id,
+                            name,
+                            input: aa_language_model::request::message::LanguageModelToolUseInput::Json(
+                                Box::new(value),
+                            ),
+                            is_complete: false,
+                        },
+                    ));
+                }
             }
             if let Some(finish_reason) = choice.finish_reason.as_deref() {
                 self.begin_finish(Some(finish_reason), out);
@@ -621,9 +669,11 @@ impl StreamDecoder {
         }
 
         if let Some(usage) = chunk.usage {
-            out.push(Ok(aa_language_model::provider::CompletionEvent::Usage(
-                usage.to_canonical(),
-            )));
+            out.push(Ok(
+                aa_language_model::provider::LanguageModelCompletionEvent::Usage(
+                    usage.to_canonical(),
+                ),
+            ));
         }
     }
 
@@ -636,12 +686,12 @@ impl StreamDecoder {
         finish_reason: Option<&str>,
         out: &mut Vec<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,
     ) {
-        use aa_language_model::provider::CompletionEvent;
+        use aa_language_model::provider::LanguageModelCompletionEvent;
 
         if self.stopped || self.pending_stop.is_some() {
             return;
@@ -650,7 +700,7 @@ impl StreamDecoder {
         if let Some(signature) = self.details.signature() {
             // 空 text + signature：agent loop 会把 signature 并进这条 assistant 消息的
             // Reasoning part，回放时再变回 `reasoning_details`。
-            out.push(Ok(CompletionEvent::Reasoning {
+            out.push(Ok(LanguageModelCompletionEvent::Reasoning {
                 text: String::new(),
                 signature: Some(signature),
             }));
@@ -679,7 +729,7 @@ impl StreamDecoder {
         &mut self,
         out: &mut Vec<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,
@@ -691,9 +741,9 @@ impl StreamDecoder {
             .pending_stop
             .take()
             .unwrap_or(aa_language_model::provider::StopReason::EndTurn);
-        out.push(Ok(aa_language_model::provider::CompletionEvent::Stop(
-            reason,
-        )));
+        out.push(Ok(
+            aa_language_model::provider::LanguageModelCompletionEvent::Stop(reason),
+        ));
         self.stopped = true;
     }
 }
@@ -708,9 +758,13 @@ impl StreamDecoder {
 ///   最后报错（不补 `Stop`——这次响应并没有正常结束）。
 pub fn non_streaming_events(
     parsed: ChatCompletionResponse,
-) -> Vec<Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>>
-{
-    use aa_language_model::provider::CompletionEvent;
+) -> Vec<
+    Result<
+        aa_language_model::provider::LanguageModelCompletionEvent,
+        aa_language_model::provider::LlmError,
+    >,
+> {
+    use aa_language_model::provider::LanguageModelCompletionEvent;
 
     let mut events = Vec::new();
 
@@ -739,7 +793,7 @@ pub fn non_streaming_events(
             }
         }
         if let Some(reasoning) = reasoning {
-            events.push(Ok(CompletionEvent::Reasoning {
+            events.push(Ok(LanguageModelCompletionEvent::Reasoning {
                 text: reasoning,
                 signature: None,
             }));
@@ -747,7 +801,7 @@ pub fn non_streaming_events(
         if let Some(details) = &choice.message.reasoning_details
             && let Ok(signature) = serde_json::to_string(details)
         {
-            events.push(Ok(CompletionEvent::Reasoning {
+            events.push(Ok(LanguageModelCompletionEvent::Reasoning {
                 text: String::new(),
                 signature: Some(signature),
             }));
@@ -756,11 +810,11 @@ pub fn non_streaming_events(
         if let Some(text) = &choice.message.content
             && !text.is_empty()
         {
-            events.push(Ok(CompletionEvent::Text(text.clone())));
+            events.push(Ok(LanguageModelCompletionEvent::Text(text.clone())));
         }
         for call in &choice.message.tool_calls {
             has_tool_calls = true;
-            events.push(Ok(CompletionEvent::ToolUse {
+            events.push(Ok(LanguageModelCompletionEvent::ToolUse {
                 id: call.id.clone(),
                 name: call.function.name.clone(),
                 input: parse_arguments(&call.function.arguments),
@@ -771,7 +825,9 @@ pub fn non_streaming_events(
 
     // `usage` 放在 `Stop` 之前：上层看到 `Stop` 就可以收尾。
     if let Some(usage) = parsed.usage {
-        events.push(Ok(CompletionEvent::Usage(usage.to_canonical())));
+        events.push(Ok(LanguageModelCompletionEvent::Usage(
+            usage.to_canonical(),
+        )));
     }
 
     // 挂在 choice 上的错误：内容已经交付，最后报错而不是假装正常结束。
@@ -780,7 +836,7 @@ pub fn non_streaming_events(
         return events;
     }
 
-    events.push(Ok(CompletionEvent::Stop(final_stop_reason(
+    events.push(Ok(LanguageModelCompletionEvent::Stop(final_stop_reason(
         finish_reason,
         has_tool_calls,
     ))));
@@ -788,16 +844,28 @@ pub fn non_streaming_events(
 }
 
 /// OpenRouter 把参数当字符串回（`arguments: "{\"path\":\"a\"}"`）；解析失败保留原文。
-fn parse_arguments(arguments: &str) -> serde_json::Value {
-    serde_json::from_str(arguments)
-        .unwrap_or_else(|_| serde_json::Value::String(arguments.to_owned()))
+/// 空串按 Zed 的约定当作空对象（无参数工具）。
+fn parse_arguments(
+    arguments: &str,
+) -> aa_language_model::request::message::LanguageModelToolUseInput {
+    if arguments.is_empty() {
+        return serde_json::json!({}).into();
+    }
+    match serde_json::from_str(arguments) {
+        Ok(value) => {
+            aa_language_model::request::message::LanguageModelToolUseInput::Json(Box::new(value))
+        }
+        Err(_) => {
+            aa_language_model::request::message::LanguageModelToolUseInput::Text(arguments.into())
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use aa_language_model::provider::{CompletionEvent, LlmError, StopReason};
+    use aa_language_model::provider::{LanguageModelCompletionEvent, LlmError, StopReason};
 
-    fn decode(payloads: &[&str]) -> Vec<Result<CompletionEvent, LlmError>> {
+    fn decode(payloads: &[&str]) -> Vec<Result<LanguageModelCompletionEvent, LlmError>> {
         let mut decoder = super::StreamDecoder::default();
         let mut out = Vec::new();
         for payload in payloads {
@@ -807,7 +875,9 @@ mod tests {
         out
     }
 
-    fn ok(events: Vec<Result<CompletionEvent, LlmError>>) -> Vec<CompletionEvent> {
+    fn ok(
+        events: Vec<Result<LanguageModelCompletionEvent, LlmError>>,
+    ) -> Vec<LanguageModelCompletionEvent> {
         events.into_iter().map(|event| event.unwrap()).collect()
     }
 
@@ -823,15 +893,15 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Text("Hel".to_owned()),
-                CompletionEvent::Text("lo".to_owned()),
+                LanguageModelCompletionEvent::Text("Hel".to_owned()),
+                LanguageModelCompletionEvent::Text("lo".to_owned()),
                 // usage 在 finish_reason 之后到；必须在 Stop 之前吐出来，否则
                 // agent loop 收尾后就读不到了。
-                CompletionEvent::Usage(aa_language_model::provider::TokenUsage {
+                LanguageModelCompletionEvent::Usage(aa_language_model::provider::TokenUsage {
                     input_tokens: 3,
                     output_tokens: 2,
                 }),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -848,22 +918,22 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "think ".to_owned(),
                     signature: None,
                 },
                 // 结构化块按 index 拼接，整体存进 signature 供下一轮回放。
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: String::new(),
                     signature: Some(
                         r#"[{"type":"reasoning.text","index":0,"text":"think more"}]"#.to_owned()
                     ),
                 },
-                CompletionEvent::Usage(aa_language_model::provider::TokenUsage {
+                LanguageModelCompletionEvent::Usage(aa_language_model::provider::TokenUsage {
                     input_tokens: 1,
                     output_tokens: 1,
                 }),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -879,15 +949,27 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::ToolUse {
+                // 第一段 `{"pa` 修补后仍不合法；第二段补齐后才发出可解析的快照。
+                partial("call_1", "read", serde_json::json!({ "path": "a" })),
+                LanguageModelCompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
                     name: "read".to_owned(),
-                    input: serde_json::json!({ "path": "a" }),
+                    input: serde_json::json!({ "path": "a" }).into(),
                     is_complete: true,
                 },
-                CompletionEvent::Stop(StopReason::ToolUse),
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
+    }
+
+    /// 流式生成中的已修补快照事件。
+    fn partial(id: &str, name: &str, value: serde_json::Value) -> LanguageModelCompletionEvent {
+        LanguageModelCompletionEvent::ToolUse {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input: value.into(),
+            is_complete: false,
+        }
     }
 
     #[test]
@@ -940,7 +1022,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(
             events[0].as_ref().unwrap(),
-            &CompletionEvent::Text("partial".to_owned())
+            &LanguageModelCompletionEvent::Text("partial".to_owned())
         );
         assert!(matches!(events[1], Err(LlmError::StreamEnded)));
     }
@@ -954,8 +1036,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Text("done".to_owned()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("done".to_owned()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -970,13 +1052,14 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::ToolUse {
+                partial("call_1", "read", serde_json::json!({})),
+                LanguageModelCompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
                     name: "read".to_owned(),
-                    input: serde_json::json!({}),
+                    input: serde_json::json!({}).into(),
                     is_complete: true,
                 },
-                CompletionEvent::Stop(StopReason::ToolUse),
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
     }
@@ -990,7 +1073,7 @@ mod tests {
 
         assert_eq!(
             events.last(),
-            Some(&CompletionEvent::Stop(StopReason::MaxTokens))
+            Some(&LanguageModelCompletionEvent::Stop(StopReason::MaxTokens))
         );
     }
 
@@ -1003,7 +1086,7 @@ mod tests {
 
         assert_eq!(
             events.last(),
-            Some(&CompletionEvent::Stop(StopReason::Refusal))
+            Some(&LanguageModelCompletionEvent::Stop(StopReason::Refusal))
         );
     }
 
@@ -1032,28 +1115,28 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "let me read".to_owned(),
                     signature: None,
                 },
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: String::new(),
                     signature: Some(
                         r#"[{"type":"reasoning.text","index":0,"text":"let me read"}]"#.to_owned()
                     ),
                 },
-                CompletionEvent::Text("reading".to_owned()),
-                CompletionEvent::ToolUse {
+                LanguageModelCompletionEvent::Text("reading".to_owned()),
+                LanguageModelCompletionEvent::ToolUse {
                     id: "call_1".to_owned(),
                     name: "read".to_owned(),
-                    input: serde_json::json!({ "path": "a" }),
+                    input: serde_json::json!({ "path": "a" }).into(),
                     is_complete: true,
                 },
-                CompletionEvent::Usage(aa_language_model::provider::TokenUsage {
+                LanguageModelCompletionEvent::Usage(aa_language_model::provider::TokenUsage {
                     input_tokens: 5,
                     output_tokens: 6,
                 }),
-                CompletionEvent::Stop(StopReason::ToolUse),
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
     }
@@ -1076,7 +1159,7 @@ mod tests {
         let events = ok(super::non_streaming_events(parsed));
         assert_eq!(
             events[0],
-            CompletionEvent::Reasoning {
+            LanguageModelCompletionEvent::Reasoning {
                 text: "short summary".to_owned(),
                 signature: None,
             }
@@ -1127,7 +1210,7 @@ mod tests {
         let events = super::non_streaming_events(parsed);
         assert_eq!(
             events[0].as_ref().unwrap(),
-            &CompletionEvent::Text("partial output".to_owned())
+            &LanguageModelCompletionEvent::Text("partial output".to_owned())
         );
         // 不补 Stop：这次响应没有正常结束。
         assert!(matches!(

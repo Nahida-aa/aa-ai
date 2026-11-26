@@ -278,7 +278,7 @@ pub enum ContentPart {
     Text(Arc<str>),
     Reasoning { text: Arc<str>, signature: Option<Arc<str>> },
     RedactedThinking(Arc<str>),                                  // 0005 新增
-    ToolCall { id: Arc<str>, name: Arc<str>, input: ToolInput },
+    ToolCall { id: Arc<str>, name: Arc<str>, input: LanguageModelToolUseInput },
     ToolResult { call_id: Arc<str>, content: Box<[ToolResultPart]>, is_error: bool },
     Image(Arc<Image>),
     Opaque(Arc<ProviderState>),
@@ -312,7 +312,7 @@ pub struct ProviderState {
 | `ContentPart::tool_call(..)` | 构造 `ToolCall` | rig `AssistantContent::tool_call` |
 | `ContentPart::tool_result(..)` | 构造 `ToolResult` | genai 无；rig 在 `UserContent` 上 |
 | `ToolResultPart::from(String / &str / Arc<str>)` | 把工具输出转成结果段 | — |
-| `ToolInput::as_value` / `to_wire_string` | 取 JSON / 转 wire 字符串 | — |
+| `LanguageModelToolUseInput::as_value` / `to_wire_string` | 取 JSON / 转 wire 字符串 | — |
 
 Zed 的 canonical `MessageContent` **有** `impl`，但只有 `is_empty()` + 两个 `From`，
 没有具名构造器（变体字段是 `pub`，provider 直接构造）。rig / genai 都有具名构造器。

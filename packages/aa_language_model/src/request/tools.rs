@@ -2,11 +2,11 @@
 //! `LanguageModelRequestTool` 一族（数据半：可序列化喂给 LLM 的工具定义，
 //! 执行半另起 trait）。
 //!
-//! 命名约定：本库类型名短、域用模块命名空间（`request::tools`）表达，
-//! 故去掉 Zed 的 `LanguageModel` / `LanguageModelRequest` 前缀。
+//! 命名约定：跨 crate 的公共类型使用完整域名，便于搜索与 AI 检索时省掉模块路径；
+//! 与 Zed 同名，去掉的只是不必要的缩写。
 //! Zed 原名映射（便于对照 Zed 更新）：
 //! - `Tool`            ← Zed `LanguageModelRequestTool`
-//! - `ToolInput`       ← Zed `LanguageModelRequestToolInput`
+//! - `LanguageModelRequestToolInput` ← Zed `LanguageModelRequestToolInput`
 //! - `CustomToolFormat`← Zed `LanguageModelCustomToolFormat`
 //! - `CustomToolGrammarSyntax` ← Zed `LanguageModelCustomToolGrammarSyntax`
 //! - `Tool::new_function` ← Zed `LanguageModelRequestTool::function`
@@ -23,7 +23,7 @@ pub struct Tool {
     /// 不直接出现在 wire 上：各 provider 序列化成自己的字段
     /// （Anthropic = `input_schema`，OpenAI = `function.parameters`）。
     /// Zed 原字段名 `input`。
-    pub input: ToolInput,
+    pub input: LanguageModelRequestToolInput,
 }
 
 impl Tool {
@@ -39,7 +39,7 @@ impl Tool {
         Self {
             name,
             description,
-            input: ToolInput::Function {
+            input: LanguageModelRequestToolInput::Function {
                 input_schema,
                 use_input_streaming,
             },
@@ -50,7 +50,7 @@ impl Tool {
 /// 工具的输入定义。`Function` = JSON Schema；`Custom` = 自定义格式。
 /// Zed 原名 `LanguageModelRequestToolInput`。
 #[derive(Debug, PartialEq, Hash, Clone, Serialize, Deserialize)]
-pub enum ToolInput {
+pub enum LanguageModelRequestToolInput {
     Function {
         /// 工具入参的 JSON Schema（喂给 LLM 让它按此填参）。
         input_schema: serde_json::Value,

@@ -1,16 +1,16 @@
 //! 流式完成事件（provider 产出，喂给 agent loop）。
-//! fork 自 Zed `LanguageModelCompletionEvent`，精简到 coding agent 需要的子集。
-//! Zed 原名 `LanguageModelCompletionEvent`。
+//! fork 自 Zed `LanguageModelLanguageModelCompletionEvent`，精简到 coding agent 需要的子集。
+//! Zed 原名 `LanguageModelLanguageModelCompletionEvent`。
 
 use serde::{Deserialize, Serialize};
 
 /// 流式完成事件。agent loop 消费这个流来驱动「收文本 / 收思考 / 收工具调用 / 结束」。
 ///
-/// 精简自 Zed `LanguageModelCompletionEvent`：去掉 `Queued`/`Started`/
+/// 精简自 Zed `LanguageModelLanguageModelCompletionEvent`：去掉 `Queued`/`Started`/
 /// `StartMessage`/`RedactedThinking`/`ReasoningDetails`/`Compaction`/
 /// `ToolUseJsonParseError` 等 Zed 特有/可选变体，保留 coding agent 核心。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum CompletionEvent {
+pub enum LanguageModelCompletionEvent {
     /// 文本增量（LLM 流式输出）。
     Text(String),
     /// 思考增量。
@@ -27,11 +27,16 @@ pub enum CompletionEvent {
         signature: Option<String>,
     },
     /// LLM 决定调一个工具（agent loop 收到后去执行，结果回填成 `Message`）。
-    /// `input` 是 LLM 给的 JSON 参数（可能不全，看 `is_complete`）。
+    ///
+    /// `is_complete: false` 是**流式快照**：provider 用 `fix_streamed_json` 把累计
+    /// 参数修补成可解析 JSON 后才发，`input` 一定是 `Json`（值可能被截断），供
+    /// 支持流式的工具提前开工 / UI 预览；坏参数不发快照，继续等。
+    /// `is_complete: true` 是最终判定：参数正常是 `Json`，坏掉时保留原文
+    /// `Text`，由工具层转成错误结果，而不是让整个响应失败。
     ToolUse {
         id: String,
         name: String,
-        input: serde_json::Value,
+        input: crate::request::message::LanguageModelToolUseInput,
         is_complete: bool,
     },
     /// 本轮结束。

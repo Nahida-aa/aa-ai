@@ -5,7 +5,7 @@
 //!   （`to_chat_completion_request` 产出借用 DTO，`encode` 用 `to_writer` 写成 owned 字节）；
 //! - [`chat_completion::response`]：响应 DTO（非流式 / SSE chunk / 错误 body）+
 //!   `finish_reason`、`usage` 映射 + `StreamDecoder`；
-//! - [`OpenAiLanguageModelProvider`]：HTTP 调用 + 响应 → `CompletionEvent`。
+//! - [`OpenAiLanguageModelProvider`]：HTTP 调用 + 响应 → `LanguageModelCompletionEvent`。
 //!
 //! 目录按**接口**分组：`chat_completion/` 是 `/chat/completions` 的请求 + 响应；
 //! 将来接 Responses API 就并列加 `responses/`，两套协议不共用结构体。
@@ -338,9 +338,13 @@ impl aa_language_model::provider::LanguageModelClient for OpenAiLanguageModelPro
 /// 非流式 body → 事件列表（最后一项是 `Stop`）。
 fn non_streaming_events(
     parsed: crate::chat_completion::response::ChatCompletionResponse,
-) -> Vec<Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>>
-{
-    use aa_language_model::provider::CompletionEvent;
+) -> Vec<
+    Result<
+        aa_language_model::provider::LanguageModelCompletionEvent,
+        aa_language_model::provider::LlmError,
+    >,
+> {
+    use aa_language_model::provider::LanguageModelCompletionEvent;
 
     let mut events = Vec::new();
     let mut has_tool_calls = false;
@@ -350,7 +354,7 @@ fn non_streaming_events(
         finish_reason = choice.finish_reason.as_deref();
         // 兼容端点的非流式思考：先于文本产出（DeepSeek 等）。
         if let Some(reasoning) = choice.message.reasoning() {
-            events.push(Ok(CompletionEvent::Reasoning {
+            events.push(Ok(LanguageModelCompletionEvent::Reasoning {
                 text: reasoning.to_owned(),
                 signature: None,
             }));
@@ -358,11 +362,11 @@ fn non_streaming_events(
         if let Some(text) = &choice.message.content
             && !text.is_empty()
         {
-            events.push(Ok(CompletionEvent::Text(text.clone())));
+            events.push(Ok(LanguageModelCompletionEvent::Text(text.clone())));
         }
         for call in &choice.message.tool_calls {
             has_tool_calls = true;
-            events.push(Ok(CompletionEvent::ToolUse {
+            events.push(Ok(LanguageModelCompletionEvent::ToolUse {
                 id: call.id.clone(),
                 name: call.function.name.clone(),
                 input: parse_arguments(&call.function.arguments),
@@ -373,23 +377,37 @@ fn non_streaming_events(
 
     // `usage` 放在 `Stop` 之前：上层看到 `Stop` 就可以收尾。
     if let Some(usage) = parsed.usage {
-        events.push(Ok(CompletionEvent::Usage(usage.to_canonical())));
+        events.push(Ok(LanguageModelCompletionEvent::Usage(
+            usage.to_canonical(),
+        )));
     }
-    events.push(Ok(CompletionEvent::Stop(
+    events.push(Ok(LanguageModelCompletionEvent::Stop(
         crate::chat_completion::response::final_stop_reason(finish_reason, has_tool_calls),
     )));
     events
 }
 
 /// OpenAI 把参数当字符串回（`arguments: "{\"path\":\"a\"}"`）；解析失败保留原文。
-fn parse_arguments(arguments: &str) -> serde_json::Value {
-    serde_json::from_str(arguments)
-        .unwrap_or_else(|_| serde_json::Value::String(arguments.to_owned()))
+/// 空串按 Zed 的约定当作空对象（无参数工具）。
+fn parse_arguments(
+    arguments: &str,
+) -> aa_language_model::request::message::LanguageModelToolUseInput {
+    if arguments.is_empty() {
+        return serde_json::json!({}).into();
+    }
+    match serde_json::from_str(arguments) {
+        Ok(value) => {
+            aa_language_model::request::message::LanguageModelToolUseInput::Json(Box::new(value))
+        }
+        Err(_) => {
+            aa_language_model::request::message::LanguageModelToolUseInput::Text(arguments.into())
+        }
+    }
 }
 
 // ---------- SSE ----------
 
-/// 把响应体解成 `CompletionEvent` 流（`text/event-stream`）。
+/// 把响应体解成 `LanguageModelCompletionEvent` 流（`text/event-stream`）。
 ///
 /// 每读到一块就解码，不把整个 body 缓冲起来。传输层已经把 idle 超时翻译成
 /// 可读文案（见 `aa_reqwest_client`），这里只负责把 io 错误透传。
@@ -401,7 +419,7 @@ fn sse_event_stream(reader: aa_http_client::AsyncBody) -> aa_language_model::pro
         decoder: crate::chat_completion::response::StreamDecoder,
         pending: VecDeque<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,
@@ -563,7 +581,7 @@ mod tests {
             tools: vec![Arc::new(aa_language_model::request::tools::Tool {
                 name: "custom".to_owned(),
                 description: String::new(),
-                input: aa_language_model::request::tools::ToolInput::Custom {
+                input: aa_language_model::request::tools::LanguageModelRequestToolInput::Custom {
                     format: Some(aa_language_model::request::tools::CustomToolFormat::Text),
                 },
             })],
@@ -795,11 +813,11 @@ mod tests {
     fn unwrap_events(
         events: Vec<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,
-    ) -> Vec<aa_language_model::provider::CompletionEvent> {
+    ) -> Vec<aa_language_model::provider::LanguageModelCompletionEvent> {
         events.into_iter().map(Result::unwrap).collect()
     }
 
@@ -823,15 +841,15 @@ mod tests {
         let events = unwrap_events(crate::non_streaming_events(parsed));
         assert!(matches!(
             events[0],
-            aa_language_model::provider::CompletionEvent::Text(_)
+            aa_language_model::provider::LanguageModelCompletionEvent::Text(_)
         ));
         assert!(matches!(
             events[1],
-            aa_language_model::provider::CompletionEvent::ToolUse { .. }
+            aa_language_model::provider::LanguageModelCompletionEvent::ToolUse { .. }
         ));
         assert_eq!(
             events[2],
-            aa_language_model::provider::CompletionEvent::Usage(
+            aa_language_model::provider::LanguageModelCompletionEvent::Usage(
                 aa_language_model::provider::TokenUsage {
                     input_tokens: 9,
                     output_tokens: 4,
@@ -840,7 +858,7 @@ mod tests {
         );
         assert_eq!(
             events[3],
-            aa_language_model::provider::CompletionEvent::Stop(
+            aa_language_model::provider::LanguageModelCompletionEvent::Stop(
                 aa_language_model::provider::StopReason::MaxTokens
             )
         );
@@ -863,17 +881,19 @@ mod tests {
         let events = unwrap_events(crate::non_streaming_events(parsed));
         assert_eq!(
             events[0],
-            aa_language_model::provider::CompletionEvent::ToolUse {
+            aa_language_model::provider::LanguageModelCompletionEvent::ToolUse {
                 id: "call_1".into(),
                 name: "read_file".into(),
                 // 半截/非 JSON 参数保留原文，不吞掉模型输出。
-                input: serde_json::Value::String("not json".into()),
+                input: aa_language_model::request::message::LanguageModelToolUseInput::Text(
+                    "not json".into()
+                ),
                 is_complete: true,
             }
         );
         assert_eq!(
             events[1],
-            aa_language_model::provider::CompletionEvent::Stop(
+            aa_language_model::provider::LanguageModelCompletionEvent::Stop(
                 aa_language_model::provider::StopReason::ToolUse
             )
         );
@@ -887,9 +907,11 @@ mod tests {
         let events = unwrap_events(crate::non_streaming_events(parsed));
         assert_eq!(
             events.last(),
-            Some(&aa_language_model::provider::CompletionEvent::Stop(
-                aa_language_model::provider::StopReason::Refusal
-            ))
+            Some(
+                &aa_language_model::provider::LanguageModelCompletionEvent::Stop(
+                    aa_language_model::provider::StopReason::Refusal
+                )
+            )
         );
     }
 
@@ -907,9 +929,9 @@ mod tests {
         assert_eq!(
             unwrap_events(events),
             vec![
-                aa_language_model::provider::CompletionEvent::Text("he".into()),
-                aa_language_model::provider::CompletionEvent::Text("llo".into()),
-                aa_language_model::provider::CompletionEvent::Stop(
+                aa_language_model::provider::LanguageModelCompletionEvent::Text("he".into()),
+                aa_language_model::provider::LanguageModelCompletionEvent::Text("llo".into()),
+                aa_language_model::provider::LanguageModelCompletionEvent::Stop(
                     aa_language_model::provider::StopReason::EndTurn
                 ),
             ]
@@ -953,8 +975,8 @@ mod tests {
         assert_eq!(
             unwrap_events(events),
             vec![
-                aa_language_model::provider::CompletionEvent::Text("hello".into()),
-                aa_language_model::provider::CompletionEvent::Stop(
+                aa_language_model::provider::LanguageModelCompletionEvent::Text("hello".into()),
+                aa_language_model::provider::LanguageModelCompletionEvent::Stop(
                     aa_language_model::provider::StopReason::EndTurn
                 ),
             ]
@@ -1041,7 +1063,7 @@ mod tests {
         assert!(
             matches!(
                 events.first(),
-                Some(Ok(aa_language_model::provider::CompletionEvent::Text(text)))
+                Some(Ok(aa_language_model::provider::LanguageModelCompletionEvent::Text(text)))
                     if text.as_str() == "he"
             ),
             "{events:?}"

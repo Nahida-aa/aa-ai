@@ -5,14 +5,14 @@
 
 #![cfg(feature = "mock-server")]
 
-use aa_language_model::provider::{CompletionEvent, StopReason, TokenUsage};
+use aa_language_model::provider::{LanguageModelCompletionEvent, StopReason, TokenUsage};
 use aa_language_models::mock_server::{MockReply, MockServer, Wire};
 
 mod support {
     use std::sync::Arc;
 
     use aa_http_client::{HttpClient, Proxy};
-    use aa_language_model::provider::CompletionEvent;
+    use aa_language_model::provider::LanguageModelCompletionEvent;
     use aa_language_model::request::Request;
     use aa_language_model::request::message::{ContentPart, Message, Role};
     use futures::StreamExt;
@@ -45,7 +45,7 @@ mod support {
     pub async fn collect_raw(
         provider: &dyn aa_language_model::provider::LanguageModelClient,
         request: &Request,
-    ) -> Vec<Result<CompletionEvent, aa_language_model::provider::LlmError>> {
+    ) -> Vec<Result<LanguageModelCompletionEvent, aa_language_model::provider::LlmError>> {
         provider
             .stream_completion(&model(), request)
             .await
@@ -57,7 +57,7 @@ mod support {
     pub async fn collect(
         provider: &dyn aa_language_model::provider::LanguageModelClient,
         request: &Request,
-    ) -> Vec<CompletionEvent> {
+    ) -> Vec<LanguageModelCompletionEvent> {
         collect_raw(provider, request)
             .await
             .into_iter()
@@ -73,12 +73,12 @@ async fn openai_streams_over_a_real_socket() {
         assert!(request.stream());
         assert_eq!(request.last_user_text(), Some("hi"));
         MockReply::events(vec![
-            CompletionEvent::Text("hello".into()),
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Text("hello".into()),
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 2,
                 output_tokens: 1,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ])
     });
 
@@ -90,13 +90,13 @@ async fn openai_streams_over_a_real_socket() {
     assert_eq!(
         events,
         vec![
-            CompletionEvent::Text("hello".into()),
+            LanguageModelCompletionEvent::Text("hello".into()),
             // OpenAI 的 usage 帧在 finish_reason 之后也会被解出来，顺序按 body 原样。
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 2,
                 output_tokens: 1,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ]
     );
     assert_eq!(server.requests().len(), 1);
@@ -118,8 +118,8 @@ async fn openai_non_streaming_body_is_served_for_stream_false() {
     assert_eq!(
         events,
         vec![
-            CompletionEvent::Text("plain".into()),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Text("plain".into()),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ]
     );
 }
@@ -129,13 +129,13 @@ async fn openrouter_streams_with_deferred_stop() {
     let server = MockServer::start(Wire::OpenRouter).unwrap();
     server.set_handler(|_| {
         MockReply::events(vec![
-            CompletionEvent::Text("hel".into()),
-            CompletionEvent::Text("lo".into()),
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Text("hel".into()),
+            LanguageModelCompletionEvent::Text("lo".into()),
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 5,
                 output_tokens: 2,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ])
     });
 
@@ -148,14 +148,14 @@ async fn openrouter_streams_with_deferred_stop() {
     assert_eq!(
         events,
         vec![
-            CompletionEvent::Text("hel".into()),
-            CompletionEvent::Text("lo".into()),
+            LanguageModelCompletionEvent::Text("hel".into()),
+            LanguageModelCompletionEvent::Text("lo".into()),
             // Stop 必须排在 Usage 后面（OpenRouter 解码器在 [DONE] 才收尾）。
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 5,
                 output_tokens: 2,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ]
     );
 }
@@ -166,12 +166,12 @@ async fn ollama_serves_ndjson_over_a_real_socket() {
     server.set_handler(|request| {
         assert!(request.stream());
         MockReply::events(vec![
-            CompletionEvent::Text("你好".into()),
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Text("你好".into()),
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 7,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ])
     });
 
@@ -182,12 +182,12 @@ async fn ollama_serves_ndjson_over_a_real_socket() {
     assert_eq!(
         events,
         vec![
-            CompletionEvent::Text("你好".into()),
-            CompletionEvent::Usage(TokenUsage {
+            LanguageModelCompletionEvent::Text("你好".into()),
+            LanguageModelCompletionEvent::Usage(TokenUsage {
                 input_tokens: 7,
                 output_tokens: 3,
             }),
-            CompletionEvent::Stop(StopReason::EndTurn),
+            LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
         ]
     );
 }

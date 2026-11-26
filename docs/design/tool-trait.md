@@ -56,11 +56,15 @@ pub trait AgentTool {
     const NAME: &'static str;
     fn input_schema() -> serde_json::Value;
 
-    /// events 是本库暴露的 trait（emit 进度/结果/取消），
+    /// 是否在参数流式生成期间就启动（默认 false）。见 §5。
+    fn supports_input_streaming() -> bool { false }
+
+    /// events 是本库暴露的 trait（emit 进度/取消/参数快照），
     /// 由调用方（会话/线程）实现并传入——工具接口不依赖任何具体线程类型。
+    /// input 是本库的入参通道（非流式工具 `recv()` 立刻拿到完整参数）。
     fn run(
         self: std::sync::Arc<Self>,
-        input: Self::Input,
+        input: ToolInput<Self::Input>,
         events: &dyn ToolEvents,
     ) -> impl std::future::Future<Output = Result<Self::Output, Self::Output>> + Send;
 }
@@ -68,6 +72,7 @@ pub trait AgentTool {
 pub trait ToolEvents {
     fn progress(&self, msg: &str);
     fn cancelled(&self) -> bool;   // 调用方是否要求取消
+    fn tool_input(&self, name: &str, raw: &str) {}  // 参数快照（默认空实现）
 }
 ```
 
@@ -76,7 +81,35 @@ pub trait ToolEvents {
 - 具体工具（应用层）只 `impl AgentTool`，事件由执行方注入
 - 和 `aa_language_model` 的工具定义（数据）通过 `Input`/`Output` 的 schema 关联，但物理分层
 
-## 5. 命名（接上一条「官方默认」决策）
+## 5. 流式入参（`ToolInput` + 修复式解析）
+
+工具参数是逐 token 生成的。为了不等到流结束才开工，链路分两段：
+
+1. **provider** 的流解码把每个参数增量喂给
+   `aa_language_model::provider::parse_streamed_json`（`fix_streamed_json` 补齐
+   `}`/`]`/`"`、丢掉悬空 `\`）；能解析才发
+   `ToolUse { is_complete: false, input: Json(…) }`，解析不出来就继续等。
+2. **agent loop** 遇到第一份快照就调用 `AgentToolRegistry::start` 启动声明了
+   `supports_input_streaming` 的工具，用 `ToolInputStream` 持续投喂快照；完整
+   `ToolUse` 到达时投喂 `Full`，参数不可解析时投喂 `InvalidJson`。
+
+工具侧看到的是 `ToolInput<Input>`：
+
+- `next()`：逐条读负载（`Partial` / `Full` / `InvalidJson`），适合提前显示标题、
+  预热、做无副作用的准备；
+- `recv()`：跳过快照等完整入参，坏参数返回 `ToolInputError`（框架统一文案），
+  由工具转成自己的错误输出。
+
+约束：
+- 快照的值可能被截断，**只能**用于预览 / 可回滚的准备，最终执行以 `Full` 为准；
+- 提前结束合法：工具在拿到第一份快照后直接返回，loop 会接住结果，后续投喂
+  落入已关闭的通道并被静默丢弃；
+- 非流式工具（默认）签名不变：`recv()` 立刻返回 `Ok`，坏 JSON 在进入工具前就
+  被 registry 转成框架错误结果（副作用安全）；
+- 取消时 loop 丢弃仍在跑的流式 future，并按调用顺序为未完成的调用写「已取消」
+  哨兵结果；已经完成的工具结果保留。
+
+## 6. 命名（接上一条「官方默认」决策）
 
 按现行约定（命名空间 + 短类型名，前缀不省略，见 [`crate-layout.md`](crate-layout.md) §3）：
 - 执行接口：`aa_agent::tool::AgentTool`（模块 `tool::agent_tool`）

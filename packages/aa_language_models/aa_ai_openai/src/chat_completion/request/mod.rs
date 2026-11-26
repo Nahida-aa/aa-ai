@@ -267,8 +267,10 @@ pub fn to_chat_completion_request<'a>(
 
     let mut tools = Vec::with_capacity(request.tools.len());
     for tool in &request.tools {
-        let aa_language_model::request::tools::ToolInput::Function { input_schema, .. } =
-            &tool.input
+        let aa_language_model::request::tools::LanguageModelRequestToolInput::Function {
+            input_schema,
+            ..
+        } = &tool.input
         else {
             return Err(aa_language_model::provider::LlmError::Unsupported(
                 "OpenAI Chat Completions does not support custom tools".to_owned(),

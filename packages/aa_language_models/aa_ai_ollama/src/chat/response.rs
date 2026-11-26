@@ -2,7 +2,7 @@
 //!
 //! 依据 [ADR 0007](../../../../../docs/decisions/0007-response-mapping.md)：
 //! - `done_reason` 是 `StopReason` 的权威来源；
-//! - 用量映射成 `CompletionEvent::Usage`；
+//! - 用量映射成 `LanguageModelCompletionEvent::Usage`；
 //! - 非 2xx / 流内 `{"error": ...}` 都抽错误文本，不把整个 body 塞进错误；
 //! - 流被截断（没收到 `done: true`）报 `StreamEnded`。
 //!
@@ -148,7 +148,7 @@ impl LineBuffer {
     }
 }
 
-/// NDJSON → `CompletionEvent` 的流式解码器。
+/// NDJSON → `LanguageModelCompletionEvent` 的流式解码器。
 ///
 /// 独立于 HTTP 层，便于单测：喂字节、拿事件，不需要起服务器。
 #[derive(Debug, Default)]
@@ -171,7 +171,10 @@ impl StreamDecoder {
         &mut self,
         chunk: &[u8],
     ) -> Vec<
-        Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
+        Result<
+            aa_language_model::provider::LanguageModelCompletionEvent,
+            aa_language_model::provider::LlmError,
+        >,
     > {
         self.lines.push(chunk);
         let mut out = Vec::new();
@@ -191,7 +194,10 @@ impl StreamDecoder {
     pub fn finish(
         mut self,
     ) -> Vec<
-        Result<aa_language_model::provider::CompletionEvent, aa_language_model::provider::LlmError>,
+        Result<
+            aa_language_model::provider::LanguageModelCompletionEvent,
+            aa_language_model::provider::LlmError,
+        >,
     > {
         let mut out = Vec::new();
         if !self.done
@@ -211,7 +217,7 @@ impl StreamDecoder {
         line: &[u8],
         out: &mut Vec<
             Result<
-                aa_language_model::provider::CompletionEvent,
+                aa_language_model::provider::LanguageModelCompletionEvent,
                 aa_language_model::provider::LlmError,
             >,
         >,
@@ -244,49 +250,58 @@ impl StreamDecoder {
             // 思考先于文本：Ollama 的 thinking 也是增量文本，按到达顺序转发。
             if !message.thinking.is_empty() {
                 out.push(Ok(
-                    aa_language_model::provider::CompletionEvent::Reasoning {
+                    aa_language_model::provider::LanguageModelCompletionEvent::Reasoning {
                         text: message.thinking.clone(),
                         signature: None,
                     },
                 ));
             }
             if !message.content.is_empty() {
-                out.push(Ok(aa_language_model::provider::CompletionEvent::Text(
-                    message.content.clone(),
-                )));
+                out.push(Ok(
+                    aa_language_model::provider::LanguageModelCompletionEvent::Text(
+                        message.content.clone(),
+                    ),
+                ));
             }
             for call in &message.tool_calls {
                 self.saw_tool_calls = true;
-                out.push(Ok(aa_language_model::provider::CompletionEvent::ToolUse {
-                    id: match &call.id {
-                        Some(id) if !id.is_empty() => id.clone(),
-                        // Ollama 不返回 id：合成一个稳定的（本次响应内递增）。
-                        // `is_complete = true`：Ollama 一次给完整参数对象，没有增量。
-                        _ => {
-                            self.next_call_id += 1;
-                            format!("call_{}", self.next_call_id)
-                        }
+                out.push(Ok(
+                    aa_language_model::provider::LanguageModelCompletionEvent::ToolUse {
+                        id: match &call.id {
+                            Some(id) if !id.is_empty() => id.clone(),
+                            // Ollama 不返回 id：合成一个稳定的（本次响应内递增）。
+                            // `is_complete = true`：Ollama 一次给完整参数对象，没有增量。
+                            _ => {
+                                self.next_call_id += 1;
+                                format!("call_{}", self.next_call_id)
+                            }
+                        },
+                        name: call.function.name.clone(),
+                        input: call.function.arguments.clone().into(),
+                        is_complete: true,
                     },
-                    name: call.function.name.clone(),
-                    input: call.function.arguments.clone(),
-                    is_complete: true,
-                }));
+                ));
             }
         }
 
         if chunk.done {
             if let (Some(input), Some(output)) = (chunk.prompt_eval_count, chunk.eval_count) {
-                out.push(Ok(aa_language_model::provider::CompletionEvent::Usage(
-                    aa_language_model::provider::TokenUsage {
-                        input_tokens: input,
-                        output_tokens: output,
-                    },
-                )));
+                out.push(Ok(
+                    aa_language_model::provider::LanguageModelCompletionEvent::Usage(
+                        aa_language_model::provider::TokenUsage {
+                            input_tokens: input,
+                            output_tokens: output,
+                        },
+                    ),
+                ));
             }
             self.stopped = true;
-            out.push(Ok(aa_language_model::provider::CompletionEvent::Stop(
-                stop_reason(chunk.done_reason.as_deref(), self.saw_tool_calls),
-            )));
+            out.push(Ok(
+                aa_language_model::provider::LanguageModelCompletionEvent::Stop(stop_reason(
+                    chunk.done_reason.as_deref(),
+                    self.saw_tool_calls,
+                )),
+            ));
             self.done = true;
         }
     }
@@ -294,14 +309,14 @@ impl StreamDecoder {
 
 #[cfg(test)]
 mod tests {
-    use aa_language_model::provider::CompletionEvent;
+    use aa_language_model::provider::LanguageModelCompletionEvent;
     use aa_language_model::provider::StopReason;
 
     use super::StreamDecoder;
 
     fn decode(
         chunks: &[&str],
-    ) -> Vec<Result<CompletionEvent, aa_language_model::provider::LlmError>> {
+    ) -> Vec<Result<LanguageModelCompletionEvent, aa_language_model::provider::LlmError>> {
         let mut decoder = StreamDecoder::default();
         let mut out = Vec::new();
         for chunk in chunks {
@@ -337,22 +352,22 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "Let me ".into(),
                     signature: None
                 },
                 // 同一帧里既有思考又有正文时，思考在前（模型先想再答）。
-                CompletionEvent::Reasoning {
+                LanguageModelCompletionEvent::Reasoning {
                     text: "think.".into(),
                     signature: None
                 },
-                CompletionEvent::Text("Hel".into()),
-                CompletionEvent::Text("lo".into()),
-                CompletionEvent::Usage(aa_language_model::provider::TokenUsage {
+                LanguageModelCompletionEvent::Text("Hel".into()),
+                LanguageModelCompletionEvent::Text("lo".into()),
+                LanguageModelCompletionEvent::Usage(aa_language_model::provider::TokenUsage {
                     input_tokens: 12,
                     output_tokens: 3
                 }),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -378,8 +393,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Text("hi".into()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("hi".into()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
@@ -393,7 +408,7 @@ mod tests {
         let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
         assert!(matches!(
             events.last(),
-            Some(CompletionEvent::Stop(StopReason::MaxTokens))
+            Some(LanguageModelCompletionEvent::Stop(StopReason::MaxTokens))
         ));
     }
 
@@ -416,13 +431,13 @@ mod tests {
             events,
             vec![
                 // Ollama 不给 id，解码器合成。
-                CompletionEvent::ToolUse {
+                LanguageModelCompletionEvent::ToolUse {
                     id: "call_1".into(),
                     name: "get_weather".into(),
-                    input: serde_json::json!({"city": "Tokyo"}),
+                    input: serde_json::json!({"city": "Tokyo"}).into(),
                     is_complete: true,
                 },
-                CompletionEvent::Stop(StopReason::ToolUse),
+                LanguageModelCompletionEvent::Stop(StopReason::ToolUse),
             ]
         );
     }
@@ -436,7 +451,7 @@ mod tests {
         let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
         assert!(matches!(
             &events[0],
-            CompletionEvent::ToolUse { id, .. } if id == "abc"
+            LanguageModelCompletionEvent::ToolUse { id, .. } if id == "abc"
         ));
     }
 
@@ -450,7 +465,7 @@ mod tests {
         let ids: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                CompletionEvent::ToolUse { id, .. } => Some(id.as_str()),
+                LanguageModelCompletionEvent::ToolUse { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -466,7 +481,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(
             events[0],
-            Ok(CompletionEvent::Text(ref text)) if text == "partial"
+            Ok(LanguageModelCompletionEvent::Text(ref text)) if text == "partial"
         ));
         assert!(matches!(
             events[1],
@@ -509,8 +524,8 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                CompletionEvent::Text("ok".into()),
-                CompletionEvent::Stop(StopReason::EndTurn),
+                LanguageModelCompletionEvent::Text("ok".into()),
+                LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
             ]
         );
     }
